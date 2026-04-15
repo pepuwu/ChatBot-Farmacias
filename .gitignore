@@ -1,0 +1,21 @@
+# Datos sensibles — nunca subir
+.env
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+bin/
+obj/
+
+# Rider / VS / VSCode
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Logs
+*.log
+
+# macOS
+.DS_Store

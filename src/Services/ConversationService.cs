@@ -1,0 +1,164 @@
+using Microsoft.EntityFrameworkCore;
+using FarmaciaAgent.Data;
+using FarmaciaAgent.Models;
+
+namespace FarmaciaAgent.Services;
+
+public class ConversationService
+{
+    private readonly AppDbContext _db;
+    private readonly AIService _aiService;
+    private readonly WhatsAppService _whatsAppService;
+    private readonly FarmaciaConfig _farmacia;
+    private readonly ILogger<ConversationService> _logger;
+
+    public ConversationService(
+        AppDbContext db,
+        AIService aiService,
+        WhatsAppService whatsAppService,
+        FarmaciaConfig farmacia,
+        ILogger<ConversationService> logger)
+    {
+        _db = db;
+        _aiService = aiService;
+        _whatsAppService = whatsAppService;
+        _farmacia = farmacia;
+        _logger = logger;
+    }
+
+    public async Task HandleIncomingMessage(string telefono, string texto)
+    {
+        var cliente = await ObtenerOCrearCliente(telefono);
+        cliente.UltimaInteraccion = DateTime.UtcNow;
+
+        var conversacion = await ObtenerConversacionActiva(cliente.Id);
+
+        // Si el farmacéutico tiene el control, no responder
+        if (conversacion.Estado == "farmaceutico")
+        {
+            _logger.LogInformation("Conversación {Id} en modo farmacéutico — mensaje ignorado", conversacion.Id);
+            await _db.SaveChangesAsync();
+            return;
+        }
+
+        // Guardar mensaje del cliente
+        _db.Mensajes.Add(new Mensaje
+        {
+            ConversacionId = conversacion.Id,
+            Role = "user",
+            Contenido = texto,
+            CreatedAt = DateTime.UtcNow
+        });
+        conversacion.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+
+        // Generar respuesta con IA
+        var historial = await ObtenerHistorial(conversacion.Id);
+        var respuesta = await _aiService.GenerarRespuesta(historial, texto);
+
+        // Guardar respuesta
+        _db.Mensajes.Add(new Mensaje
+        {
+            ConversacionId = conversacion.Id,
+            Role = "assistant",
+            Contenido = respuesta,
+            CreatedAt = DateTime.UtcNow
+        });
+        await _db.SaveChangesAsync();
+
+        await _whatsAppService.SendMessage(telefono, respuesta);
+    }
+
+    public async Task<Conversacion> ObtenerConversacionActiva(int clienteId)
+    {
+        var conversacion = await _db.Conversaciones
+            .Where(c => c.ClienteId == clienteId)
+            .OrderByDescending(c => c.UpdatedAt)
+            .FirstOrDefaultAsync();
+
+        // Si no existe o la última sesión expiró, crear una nueva
+        var timeout = TimeSpan.FromMinutes(_farmacia.TiempoSesionMinutos);
+        if (conversacion is null || DateTime.UtcNow - conversacion.UpdatedAt > timeout)
+        {
+            conversacion = new Conversacion
+            {
+                ClienteId = clienteId,
+                Estado = "bot",
+                UpdatedAt = DateTime.UtcNow
+            };
+            _db.Conversaciones.Add(conversacion);
+            await _db.SaveChangesAsync();
+        }
+
+        return conversacion;
+    }
+
+    public async Task CambiarEstado(int conversacionId, string nuevoEstado)
+    {
+        var conversacion = await _db.Conversaciones.FindAsync(conversacionId);
+        if (conversacion is not null)
+        {
+            conversacion.Estado = nuevoEstado;
+            conversacion.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+        }
+    }
+
+    public async Task<List<Conversacion>> GetConversacionesEnEspera()
+    {
+        return await _db.Conversaciones
+            .Include(c => c.Cliente)
+            .Where(c => c.Estado == "espera")
+            .OrderBy(c => c.UpdatedAt)
+            .ToListAsync();
+    }
+
+    public async Task<List<Conversacion>> GetConversacionesConFarmaceutico()
+    {
+        return await _db.Conversaciones
+            .Include(c => c.Cliente)
+            .Where(c => c.Estado == "farmaceutico")
+            .ToListAsync();
+    }
+
+    private async Task<Cliente> ObtenerOCrearCliente(string telefono)
+    {
+        var cliente = await _db.Clientes.FirstOrDefaultAsync(c => c.Telefono == telefono);
+        if (cliente is null)
+        {
+            cliente = new Cliente { Telefono = telefono, Nombre = telefono, UltimaInteraccion = DateTime.UtcNow };
+            _db.Clientes.Add(cliente);
+            await _db.SaveChangesAsync();
+        }
+        return cliente;
+    }
+
+    private async Task<List<Mensaje>> ObtenerHistorial(int conversacionId)
+    {
+        return await _db.Mensajes
+            .Where(m => m.ConversacionId == conversacionId)
+            .OrderBy(m => m.CreatedAt)
+            .TakeLast(20)
+            .ToListAsync();
+    }
+
+    // Llamado por el background service para cerrar sesiones inactivas
+    public async Task CerrarSesionesInactivas()
+    {
+        var timeout = TimeSpan.FromMinutes(_farmacia.TiempoSesionMinutos);
+        var limite = DateTime.UtcNow - timeout;
+
+        var inactivas = await _db.Conversaciones
+            .Where(c => c.Estado == "bot" && c.UpdatedAt < limite)
+            .ToListAsync();
+
+        foreach (var c in inactivas)
+            c.Estado = "cerrada";
+
+        if (inactivas.Count > 0)
+        {
+            await _db.SaveChangesAsync();
+            _logger.LogInformation("{Count} sesiones cerradas por inactividad", inactivas.Count);
+        }
+    }
+}
