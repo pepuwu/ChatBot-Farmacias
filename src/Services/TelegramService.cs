@@ -11,8 +11,6 @@ namespace FarmaciaAgent.Services;
 public class TelegramService : BackgroundService
 {
     private readonly ITelegramBotClient _bot;
-    private readonly ConversationService _conversationService;
-    private readonly WhatsAppService _whatsAppService;
     private readonly FarmaciaConfig _farmacia;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelegramService> _logger;
@@ -23,8 +21,6 @@ public class TelegramService : BackgroundService
     public TelegramService(
         IConfiguration config,
         IHostEnvironment env,
-        ConversationService conversationService,
-        WhatsAppService whatsAppService,
         FarmaciaConfig farmacia,
         IServiceScopeFactory scopeFactory,
         ILogger<TelegramService> logger)
@@ -35,8 +31,6 @@ public class TelegramService : BackgroundService
         _adminId = long.Parse(adminIdStr);
         _webhookUrl = config["TELEGRAM_WEBHOOK_URL"];
         _useWebhook = env.IsProduction() || !string.IsNullOrWhiteSpace(_webhookUrl);
-        _conversationService = conversationService;
-        _whatsAppService = whatsAppService;
         _farmacia = farmacia;
         _scopeFactory = scopeFactory;
         _logger = logger;
@@ -56,20 +50,18 @@ public class TelegramService : BackgroundService
             await _bot.SetWebhook(url, cancellationToken: stoppingToken);
             _logger.LogInformation("Telegram webhook registrado en {Url}. Admin ID: {AdminId}", url, _adminId);
 
-            // En modo webhook el bot escucha pasivamente — los updates llegan por HTTP
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
         else
         {
             _logger.LogInformation("Telegram polling iniciado. Admin ID: {AdminId}", _adminId);
 
-            // Eliminar webhook previo para evitar conflicto 409
             await _bot.DeleteWebhook(cancellationToken: stoppingToken);
 
             var receiverOptions = new ReceiverOptions { AllowedUpdates = [UpdateType.Message] };
 
             _bot.StartReceiving(
-                updateHandler: HandleUpdate,
+                updateHandler: HandleUpdateCallback,
                 errorHandler: HandleError,
                 receiverOptions: receiverOptions,
                 cancellationToken: stoppingToken
@@ -79,7 +71,8 @@ public class TelegramService : BackgroundService
         }
     }
 
-    public async Task HandleUpdate(ITelegramBotClient bot, Update update, CancellationToken ct)
+    // Callback para polling
+    private async Task HandleUpdateCallback(ITelegramBotClient bot, Update update, CancellationToken ct)
     {
         if (update.Message?.Text is not { } text)
             return;
@@ -95,12 +88,22 @@ public class TelegramService : BackgroundService
         await HandleUpdate(update);
     }
 
+    // Punto de entrada desde TelegramController (webhook) y polling
     public async Task HandleUpdate(Update update)
     {
         if (update.Message?.Text is not { } text)
             return;
 
         var chatId = update.Message.From?.Id ?? 0;
+
+        // Validar admin también en webhook
+        if (chatId != _adminId)
+        {
+            await _bot.SendMessage(chatId, "No autorizado.");
+            return;
+        }
+
+        _logger.LogInformation("Comando de admin {ChatId}: {Text}", chatId, text);
 
         try
         {
@@ -137,6 +140,7 @@ public class TelegramService : BackgroundService
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var conversationService = scope.ServiceProvider.GetRequiredService<ConversationService>();
 
         var cliente = await db.Clientes.FirstOrDefaultAsync(c => c.Telefono == telefono);
         if (cliente is null)
@@ -145,15 +149,18 @@ public class TelegramService : BackgroundService
             return;
         }
 
-        var conversacion = await _conversationService.ObtenerConversacionActiva(cliente.Id);
-        await _conversationService.CambiarEstado(conversacion.Id, "farmaceutico");
+        var conversacion = await conversationService.ObtenerConversacionActiva(cliente.Id);
+        await conversationService.CambiarEstado(conversacion.Id, "farmaceutico");
 
         await _bot.SendMessage(chatId, $"✅ Tomaste control de la conversación con {telefono}. El bot está silenciado.\nUsá /fin para liberar.");
     }
 
     private async Task HandleFin(long chatId)
     {
-        var conversaciones = await _conversationService.GetConversacionesConFarmaceutico();
+        using var scope = _scopeFactory.CreateScope();
+        var conversationService = scope.ServiceProvider.GetRequiredService<ConversationService>();
+
+        var conversaciones = await conversationService.GetConversacionesConFarmaceutico();
 
         if (conversaciones.Count == 0)
         {
@@ -163,9 +170,8 @@ public class TelegramService : BackgroundService
 
         foreach (var conv in conversaciones)
         {
-            await _conversationService.CambiarEstado(conv.Id, "bot");
-            var telefono = conv.Cliente?.Telefono ?? "desconocido";
-            _logger.LogInformation("Farmacéutico liberó conversación con {Telefono}", telefono);
+            await conversationService.CambiarEstado(conv.Id, "bot");
+            _logger.LogInformation("Farmacéutico liberó conversación con {Telefono}", conv.Cliente?.Telefono);
         }
 
         await _bot.SendMessage(chatId, $"✅ {conversaciones.Count} conversación(es) devuelta(s) al bot.");
@@ -173,7 +179,10 @@ public class TelegramService : BackgroundService
 
     private async Task HandleCola(long chatId)
     {
-        var cola = await _conversationService.GetConversacionesEnEspera();
+        using var scope = _scopeFactory.CreateScope();
+        var conversationService = scope.ServiceProvider.GetRequiredService<ConversationService>();
+
+        var cola = await conversationService.GetConversacionesEnEspera();
 
         if (cola.Count == 0)
         {
@@ -200,6 +209,7 @@ public class TelegramService : BackgroundService
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var whatsAppService = scope.ServiceProvider.GetRequiredService<WhatsAppService>();
 
         var clientes = await db.Clientes.ToListAsync();
 
@@ -219,14 +229,14 @@ public class TelegramService : BackgroundService
 
         foreach (var cliente in clientes)
         {
-            var enviado = await _whatsAppService.SendMessage(cliente.Telefono, mensaje);
+            var enviado = await whatsAppService.SendMessage(cliente.Telefono, mensaje);
             if (enviado)
                 enviados++;
             else
                 simulados.Add(cliente.Telefono);
         }
 
-        if (_whatsAppService.SimulationMode)
+        if (whatsAppService.SimulationMode)
         {
             var lista = string.Join("\n", simulados.Select(t => $"  • {t}"));
             await _bot.SendMessage(chatId,

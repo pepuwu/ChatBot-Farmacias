@@ -4,9 +4,6 @@ using FarmaciaAgent.Services;
 
 namespace FarmaciaAgent.Controllers;
 
-// El bot de Telegram usa polling (TelegramService lo maneja como BackgroundService).
-// Este controller queda disponible si se prefiere migrar a webhooks en el futuro.
-
 [ApiController]
 [Route("api/telegram")]
 public class TelegramController : ControllerBase
@@ -23,6 +20,11 @@ public class TelegramController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Update([FromBody] Update update)
     {
+        _logger.LogInformation("Telegram webhook recibió update. Type={Type} ChatId={ChatId} Text={Text}",
+            update.Type,
+            update.Message?.Chat?.Id,
+            update.Message?.Text);
+
         try
         {
             await _telegramService.HandleUpdate(update);
@@ -32,6 +34,19 @@ public class TelegramController : ControllerBase
             _logger.LogError(ex, "Error procesando update de Telegram");
         }
 
+        // Telegram requiere 200 OK siempre, incluso si hubo error interno
         return Ok();
+    }
+
+    // Endpoint de diagnóstico — GET /api/telegram/status
+    [HttpGet("status")]
+    public IActionResult Status()
+    {
+        return Ok(new
+        {
+            webhook = "activo",
+            endpoint = "/api/telegram",
+            timestamp = DateTime.UtcNow
+        });
     }
 }
