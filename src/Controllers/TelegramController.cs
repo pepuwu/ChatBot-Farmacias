@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Telegram.Bot.Types;
-using Newtonsoft.Json;
+using System.Text.Json;
 using FarmaciaAgent.Services;
 
 namespace FarmaciaAgent.Controllers;
@@ -21,33 +21,18 @@ public class TelegramController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Update()
     {
-        string body;
-        using (var reader = new StreamReader(Request.Body))
-            body = await reader.ReadToEndAsync();
+        using var reader = new StreamReader(Request.Body);
+        var body = await reader.ReadToEndAsync();
 
-        _logger.LogInformation("Telegram webhook recibió body: {Body}", body);
+        _logger.LogInformation("Telegram webhook body: {Body}", body);
 
-        Update? update;
-        try
-        {
-            update = JsonConvert.DeserializeObject<Update>(body);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deserializando Update de Telegram");
-            return Ok(); // siempre 200 para que Telegram no reintente
-        }
+        var update = JsonSerializer.Deserialize<Update>(body,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-        if (update is null)
-        {
-            _logger.LogWarning("Update deserializado como null");
-            return Ok();
-        }
+        if (update == null) return Ok();
 
         _logger.LogInformation("Update procesado. Type={Type} ChatId={ChatId} Text={Text}",
-            update.Type,
-            update.Message?.Chat?.Id,
-            update.Message?.Text);
+            update.Type, update.Message?.Chat?.Id, update.Message?.Text);
 
         try
         {
@@ -62,8 +47,6 @@ public class TelegramController : ControllerBase
     }
 
     [HttpGet("status")]
-    public IActionResult Status()
-    {
-        return Ok(new { webhook = "activo", endpoint = "/api/telegram", timestamp = DateTime.UtcNow });
-    }
+    public IActionResult Status() =>
+        Ok(new { webhook = "activo", endpoint = "/api/telegram", timestamp = DateTime.UtcNow });
 }
