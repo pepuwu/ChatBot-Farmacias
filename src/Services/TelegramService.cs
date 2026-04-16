@@ -17,9 +17,12 @@ public class TelegramService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelegramService> _logger;
     private readonly long _adminId;
+    private readonly string? _webhookUrl;
+    private readonly bool _useWebhook;
 
     public TelegramService(
         IConfiguration config,
+        IHostEnvironment env,
         ConversationService conversationService,
         WhatsAppService whatsAppService,
         FarmaciaConfig farmacia,
@@ -30,6 +33,8 @@ public class TelegramService : BackgroundService
         _bot = new TelegramBotClient(token);
         var adminIdStr = config["TELEGRAM_ADMIN_ID"] ?? farmacia.TelegramAdminId;
         _adminId = long.Parse(adminIdStr);
+        _webhookUrl = config["TELEGRAM_WEBHOOK_URL"];
+        _useWebhook = env.IsProduction() || !string.IsNullOrWhiteSpace(_webhookUrl);
         _conversationService = conversationService;
         _whatsAppService = whatsAppService;
         _farmacia = farmacia;
@@ -39,18 +44,39 @@ public class TelegramService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Telegram polling iniciado. Admin ID: {AdminId}", _adminId);
+        if (_useWebhook)
+        {
+            if (string.IsNullOrWhiteSpace(_webhookUrl))
+            {
+                _logger.LogError("Modo webhook activo pero TELEGRAM_WEBHOOK_URL no está configurado.");
+                return;
+            }
 
-        var receiverOptions = new ReceiverOptions { AllowedUpdates = [UpdateType.Message] };
+            var url = _webhookUrl.TrimEnd('/') + "/api/telegram";
+            await _bot.SetWebhook(url, cancellationToken: stoppingToken);
+            _logger.LogInformation("Telegram webhook registrado en {Url}. Admin ID: {AdminId}", url, _adminId);
 
-        _bot.StartReceiving(
-            updateHandler: HandleUpdate,
-            errorHandler: HandleError,
-            receiverOptions: receiverOptions,
-            cancellationToken: stoppingToken
-        );
+            // En modo webhook el bot escucha pasivamente — los updates llegan por HTTP
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+        else
+        {
+            _logger.LogInformation("Telegram polling iniciado. Admin ID: {AdminId}", _adminId);
 
-        await Task.Delay(Timeout.Infinite, stoppingToken);
+            // Eliminar webhook previo para evitar conflicto 409
+            await _bot.DeleteWebhook(cancellationToken: stoppingToken);
+
+            var receiverOptions = new ReceiverOptions { AllowedUpdates = [UpdateType.Message] };
+
+            _bot.StartReceiving(
+                updateHandler: HandleUpdate,
+                errorHandler: HandleError,
+                receiverOptions: receiverOptions,
+                cancellationToken: stoppingToken
+            );
+
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
     }
 
     public async Task HandleUpdate(ITelegramBotClient bot, Update update, CancellationToken ct)
@@ -221,7 +247,7 @@ public class TelegramService : BackgroundService
             "• /tomar [número] — tomar control de una conversación\n" +
             "• /fin — devolver conversaciones al bot\n" +
             "• /cola — ver clientes en espera\n" +
-            "• /oferta [texto] — enviar mensaje a todos los clientes\n" +
+            "• /oferta [texto] — enviar oferta a todos los clientes\n" +
             "• /ayuda — mostrar este menú");
     }
 
