@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Telegram.Bot.Types;
+using Newtonsoft.Json;
 using FarmaciaAgent.Services;
 
 namespace FarmaciaAgent.Controllers;
@@ -18,9 +19,32 @@ public class TelegramController : ControllerBase
     }
 
     [HttpPost]
-    public async Task<IActionResult> Update([FromBody] Update update)
+    public async Task<IActionResult> Update()
     {
-        _logger.LogInformation("Telegram webhook recibió update. Type={Type} ChatId={ChatId} Text={Text}",
+        string body;
+        using (var reader = new StreamReader(Request.Body))
+            body = await reader.ReadToEndAsync();
+
+        _logger.LogInformation("Telegram webhook recibió body: {Body}", body);
+
+        Update? update;
+        try
+        {
+            update = JsonConvert.DeserializeObject<Update>(body);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deserializando Update de Telegram");
+            return Ok(); // siempre 200 para que Telegram no reintente
+        }
+
+        if (update is null)
+        {
+            _logger.LogWarning("Update deserializado como null");
+            return Ok();
+        }
+
+        _logger.LogInformation("Update procesado. Type={Type} ChatId={ChatId} Text={Text}",
             update.Type,
             update.Message?.Chat?.Id,
             update.Message?.Text);
@@ -34,19 +58,12 @@ public class TelegramController : ControllerBase
             _logger.LogError(ex, "Error procesando update de Telegram");
         }
 
-        // Telegram requiere 200 OK siempre, incluso si hubo error interno
         return Ok();
     }
 
-    // Endpoint de diagnóstico — GET /api/telegram/status
     [HttpGet("status")]
     public IActionResult Status()
     {
-        return Ok(new
-        {
-            webhook = "activo",
-            endpoint = "/api/telegram",
-            timestamp = DateTime.UtcNow
-        });
+        return Ok(new { webhook = "activo", endpoint = "/api/telegram", timestamp = DateTime.UtcNow });
     }
 }
