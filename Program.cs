@@ -41,7 +41,6 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddHttpClient<WhatsAppService>();
 
 // Services
-builder.Services.AddScoped<StockService>();
 builder.Services.AddScoped<AIService>();
 builder.Services.AddScoped<ConversationService>();
 

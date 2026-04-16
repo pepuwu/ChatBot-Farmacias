@@ -2,17 +2,15 @@ using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
-using FarmaciaAgent.Models;
 using FarmaciaAgent.Data;
+using FarmaciaAgent.Models;
 using Microsoft.EntityFrameworkCore;
-using System.Text.RegularExpressions;
 
 namespace FarmaciaAgent.Services;
 
 public class TelegramService : BackgroundService
 {
     private readonly ITelegramBotClient _bot;
-    private readonly StockService _stockService;
     private readonly ConversationService _conversationService;
     private readonly WhatsAppService _whatsAppService;
     private readonly FarmaciaConfig _farmacia;
@@ -22,7 +20,6 @@ public class TelegramService : BackgroundService
 
     public TelegramService(
         IConfiguration config,
-        StockService stockService,
         ConversationService conversationService,
         WhatsAppService whatsAppService,
         FarmaciaConfig farmacia,
@@ -33,7 +30,6 @@ public class TelegramService : BackgroundService
         _bot = new TelegramBotClient(token);
         var adminIdStr = config["TELEGRAM_ADMIN_ID"] ?? farmacia.TelegramAdminId;
         _adminId = long.Parse(adminIdStr);
-        _stockService = stockService;
         _conversationService = conversationService;
         _whatsAppService = whatsAppService;
         _farmacia = farmacia;
@@ -64,7 +60,6 @@ public class TelegramService : BackgroundService
 
         var chatId = update.Message.From?.Id ?? 0;
 
-        // Solo el admin puede usar el bot
         if (chatId != _adminId)
         {
             await bot.SendMessage(chatId, "No autorizado.", cancellationToken: ct);
@@ -83,18 +78,18 @@ public class TelegramService : BackgroundService
 
         try
         {
-            if (text.StartsWith("/stock"))
-                await HandleStock(chatId);
-            else if (text.StartsWith("/tomar"))
+            if (text.StartsWith("/tomar"))
                 await HandleTomar(chatId, text);
             else if (text.StartsWith("/fin"))
                 await HandleFin(chatId);
             else if (text.StartsWith("/cola"))
                 await HandleCola(chatId);
-            else if (text.StartsWith("/alertas"))
-                await HandleAlertas(chatId);
+            else if (text.StartsWith("/oferta"))
+                await HandleOferta(chatId, text);
+            else if (text.StartsWith("/ayuda") || text == "/start")
+                await HandleAyuda(chatId);
             else
-                await HandleStockNatural(chatId, text);
+                await HandleAyuda(chatId);
         }
         catch (Exception ex)
         {
@@ -103,23 +98,8 @@ public class TelegramService : BackgroundService
         }
     }
 
-    private async Task HandleStock(long chatId)
-    {
-        var productos = await _stockService.GetTodoElStock();
-
-        if (productos.Count == 0)
-        {
-            await _bot.SendMessage(chatId, "No hay productos cargados.");
-            return;
-        }
-
-        var lines = productos.Select(p => $"• {p.Nombre}: {p.Stock} unidades" + (p.Precio > 0 ? $" (${p.Precio})" : ""));
-        await _bot.SendMessage(chatId, $"📦 Stock actual:\n\n{string.Join("\n", lines)}");
-    }
-
     private async Task HandleTomar(long chatId, string text)
     {
-        // /tomar +5491112345678
         var parts = text.Split(' ', 2);
         if (parts.Length < 2)
         {
@@ -179,61 +159,70 @@ public class TelegramService : BackgroundService
         await _bot.SendMessage(chatId, $"⏳ Clientes esperando:\n\n{string.Join("\n", lines)}");
     }
 
-    private async Task HandleAlertas(long chatId)
+    private async Task HandleOferta(long chatId, string text)
     {
-        var bajos = await _stockService.GetStockBajo();
-
-        if (bajos.Count == 0)
-        {
-            await _bot.SendMessage(chatId, "✅ Todo el stock está bien.");
-            return;
-        }
-
-        var lines = bajos.Select(p => $"⚠️ {p.Nombre}: solo {p.Stock} unidades");
-        await _bot.SendMessage(chatId, $"Alertas de stock bajo:\n\n{string.Join("\n", lines)}");
-    }
-
-    // Interpreta mensajes naturales de stock: "Llegaron 50 ibuprofeno 400mg"
-    private async Task HandleStockNatural(long chatId, string text)
-    {
-        var match = Regex.Match(text, @"(?:llegaron?|cargué?|sumá?|agreg[aué]+)\s+(\d+)\s+(.+)", RegexOptions.IgnoreCase);
-
-        if (!match.Success)
+        var parts = text.Split(' ', 2);
+        if (parts.Length < 2 || string.IsNullOrWhiteSpace(parts[1]))
         {
             await _bot.SendMessage(chatId,
-                "No entendí el comando. Podés usar:\n" +
-                "• /stock — ver todo el stock\n" +
-                "• /tomar [número] — tomar control de una conversación\n" +
-                "• /fin — liberar conversaciones\n" +
-                "• /cola — ver clientes en espera\n" +
-                "• /alertas — ver stock bajo\n" +
-                "• \"Llegaron 50 ibuprofeno 400mg\" — actualizar stock");
+                "Uso: /oferta [texto de la oferta]\n" +
+                "Ejemplo: /oferta Ibuprofeno 400mg x20 comp $2500 solo hoy");
             return;
         }
 
-        var cantidad = int.Parse(match.Groups[1].Value);
-        var productoNombre = match.Groups[2].Value.Trim();
+        var oferta = parts[1].Trim();
 
-        await _stockService.ActualizarStock(productoNombre, cantidad);
-        await _bot.SendMessage(chatId, $"✅ Stock actualizado: +{cantidad} {productoNombre}");
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        // Notificar a clientes en lista de espera
-        var enEspera = await _stockService.GetListaEsperaPorProducto(productoNombre);
-        if (enEspera.Count > 0)
+        var clientes = await db.Clientes.ToListAsync();
+
+        if (clientes.Count == 0)
         {
-            foreach (var item in enEspera)
-            {
-                var telefono = item.Cliente?.Telefono;
-                if (telefono is not null)
-                {
-                    await _whatsAppService.SendMessage(telefono,
-                        $"¡Hola! Te avisamos que {productoNombre} ya está disponible en {_farmacia.Nombre}. ¡Pasá o pedí tu delivery!");
-                }
-            }
-
-            await _stockService.MarcarNotificados(enEspera.Select(e => e.Id).ToList());
-            await _bot.SendMessage(chatId, $"📣 Se notificó a {enEspera.Count} cliente(s) en lista de espera.");
+            await _bot.SendMessage(chatId, "No hay clientes registrados aún.");
+            return;
         }
+
+        var mensaje =
+            $"💊 Oferta {_farmacia.Nombre}\n\n" +
+            $"{oferta}\n\n" +
+            $"¿Querés que te reservemos uno? Respondé SÍ";
+
+        var enviados = 0;
+        var simulados = new List<string>();
+
+        foreach (var cliente in clientes)
+        {
+            var enviado = await _whatsAppService.SendMessage(cliente.Telefono, mensaje);
+            if (enviado)
+                enviados++;
+            else
+                simulados.Add(cliente.Telefono);
+        }
+
+        if (_whatsAppService.SimulationMode)
+        {
+            var lista = string.Join("\n", simulados.Select(t => $"  • {t}"));
+            await _bot.SendMessage(chatId,
+                $"⚠️ WhatsApp no configurado — simulación:\n\n" +
+                $"Se hubiera enviado a {simulados.Count} cliente(s):\n{lista}");
+        }
+        else
+        {
+            await _bot.SendMessage(chatId, $"✅ Oferta enviada a {enviados} cliente(s).");
+        }
+    }
+
+    private async Task HandleAyuda(long chatId)
+    {
+        await _bot.SendMessage(chatId,
+            $"🤖 Bot de {_farmacia.Nombre}\n\n" +
+            "Comandos disponibles:\n" +
+            "• /tomar [número] — tomar control de una conversación\n" +
+            "• /fin — devolver conversaciones al bot\n" +
+            "• /cola — ver clientes en espera\n" +
+            "• /oferta [texto] — enviar mensaje a todos los clientes\n" +
+            "• /ayuda — mostrar este menú");
     }
 
     private Task HandleError(ITelegramBotClient bot, Exception ex, HandleErrorSource source, CancellationToken ct)

@@ -7,20 +7,12 @@ public class AppDbContext : DbContext
 {
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 
-    public DbSet<Producto> Productos => Set<Producto>();
     public DbSet<Cliente> Clientes => Set<Cliente>();
     public DbSet<Conversacion> Conversaciones => Set<Conversacion>();
     public DbSet<Mensaje> Mensajes => Set<Mensaje>();
-    public DbSet<ListaEspera> ListaEspera => Set<ListaEspera>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<Producto>(e =>
-        {
-            e.HasKey(p => p.Id);
-            e.Property(p => p.Precio).HasColumnType("TEXT");
-        });
-
         modelBuilder.Entity<Cliente>(e =>
         {
             e.HasKey(c => c.Id);
@@ -41,14 +33,6 @@ public class AppDbContext : DbContext
             e.HasOne(m => m.Conversacion)
              .WithMany(c => c.Mensajes)
              .HasForeignKey(m => m.ConversacionId);
-        });
-
-        modelBuilder.Entity<ListaEspera>(e =>
-        {
-            e.HasKey(l => l.Id);
-            e.HasOne(l => l.Cliente)
-             .WithMany()
-             .HasForeignKey(l => l.ClienteId);
         });
     }
 }

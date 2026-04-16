@@ -22,13 +22,3 @@ public class Mensaje
     public Conversacion? Conversacion { get; set; }
 }
 
-public class ListaEspera
-{
-    public int Id { get; set; }
-    public int ClienteId { get; set; }
-    public string ProductoNombre { get; set; } = "";
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public bool Notificado { get; set; } = false;
-
-    public Cliente? Cliente { get; set; }
-}
