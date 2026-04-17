@@ -141,8 +141,9 @@ public class ConversationService
     {
         return await _db.Mensajes
             .Where(m => m.ConversacionId == conversacionId)
+            .OrderByDescending(m => m.CreatedAt)
+            .Take(20)
             .OrderBy(m => m.CreatedAt)
-            .TakeLast(20)
             .ToListAsync();
     }
 
