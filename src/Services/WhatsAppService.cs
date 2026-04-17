@@ -29,6 +29,10 @@ public class WhatsAppService
         if (!to.StartsWith("+"))
             to = "+" + to;
 
+        // Argentina: el webhook manda +5492944340983 pero la API espera +542944340983 (sin el 9 de celular).
+        if (to.StartsWith("+549"))
+            to = "+54" + to[4..];
+
         if (SimulationMode)
         {
             _logger.LogInformation("[SIMULACIÓN] WhatsApp → {To}: {Text}", to, text);
