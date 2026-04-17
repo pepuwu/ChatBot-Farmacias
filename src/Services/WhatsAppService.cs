@@ -25,6 +25,10 @@ public class WhatsAppService
 
     public async Task<bool> SendMessage(string to, string text)
     {
+        // Meta requiere el número con + (E.164). El webhook entrante lo manda sin +.
+        if (!to.StartsWith("+"))
+            to = "+" + to;
+
         if (SimulationMode)
         {
             _logger.LogInformation("[SIMULACIÓN] WhatsApp → {To}: {Text}", to, text);
