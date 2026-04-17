@@ -35,7 +35,7 @@ public class WhatsAppService
             return false; // false = simulado
         }
 
-        var url = $"https://graph.facebook.com/v19.0/{_phoneId}/messages";
+        var url = $"https://graph.facebook.com/v25.0/{_phoneId}/messages";
 
         var payload = new
         {
