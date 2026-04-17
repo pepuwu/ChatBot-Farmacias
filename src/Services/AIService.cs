@@ -12,12 +12,12 @@ public class AIService
 
     public AIService(IConfiguration config, FarmaciaConfig farmacia, ILogger<AIService> logger)
     {
+        _logger = logger;
+        _farmacia = farmacia;
         var apiKey = config["OPENAI_API_KEY"] ?? throw new InvalidOperationException("OPENAI_API_KEY no configurado");
         _logger.LogInformation("AIService inicializado. Modelo: gpt-4.1-nano. API key prefix: {Prefix}",
             apiKey.Length > 10 ? apiKey[..10] + "..." : "(vacía)");
         _client = new OpenAIClient(apiKey).GetChatClient("gpt-4.1-nano");
-        _farmacia = farmacia;
-        _logger = logger;
     }
 
     public async Task<string> GenerarRespuesta(List<Mensaje> historial, string mensajeActual)
