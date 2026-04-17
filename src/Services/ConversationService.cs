@@ -28,20 +28,22 @@ public class ConversationService
 
     public async Task HandleIncomingMessage(string telefono, string texto)
     {
+        _logger.LogInformation("[1/5] Mensaje recibido de {Telefono}: {Texto}", telefono, texto);
+
         var cliente = await ObtenerOCrearCliente(telefono);
         cliente.UltimaInteraccion = DateTime.UtcNow;
+        _logger.LogInformation("[2/5] Cliente {ClienteId} ({Telefono})", cliente.Id, telefono);
 
         var conversacion = await ObtenerConversacionActiva(cliente.Id);
+        _logger.LogInformation("[3/5] Conversación {ConversacionId} — estado: {Estado}", conversacion.Id, conversacion.Estado);
 
-        // Si el farmacéutico tiene el control, no responder
         if (conversacion.Estado == "farmaceutico")
         {
-            _logger.LogInformation("Conversación {Id} en modo farmacéutico — mensaje ignorado", conversacion.Id);
+            _logger.LogInformation("Conversación en modo farmacéutico — mensaje ignorado");
             await _db.SaveChangesAsync();
             return;
         }
 
-        // Guardar mensaje del cliente
         _db.Mensajes.Add(new Mensaje
         {
             ConversacionId = conversacion.Id,
@@ -52,11 +54,11 @@ public class ConversationService
         conversacion.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync();
 
-        // Generar respuesta con IA
+        _logger.LogInformation("[4/5] Llamando a OpenAI...");
         var historial = await ObtenerHistorial(conversacion.Id);
         var respuesta = await _aiService.GenerarRespuesta(historial, texto);
+        _logger.LogInformation("[4/5] Respuesta OpenAI: {Respuesta}", respuesta);
 
-        // Guardar respuesta
         _db.Mensajes.Add(new Mensaje
         {
             ConversacionId = conversacion.Id,
@@ -66,7 +68,9 @@ public class ConversationService
         });
         await _db.SaveChangesAsync();
 
-        await _whatsAppService.SendMessage(telefono, respuesta);
+        _logger.LogInformation("[5/5] Enviando respuesta por WhatsApp a {Telefono}...", telefono);
+        var enviado = await _whatsAppService.SendMessage(telefono, respuesta);
+        _logger.LogInformation("[5/5] WhatsApp enviado={Enviado} simulacion={Simulacion}", enviado, _whatsAppService.SimulationMode);
     }
 
     public async Task<Conversacion> ObtenerConversacionActiva(int clienteId)

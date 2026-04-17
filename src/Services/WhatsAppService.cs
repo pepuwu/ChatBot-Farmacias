@@ -49,11 +49,11 @@ public class WhatsAppService
 
         var response = await _http.SendAsync(request);
 
+        var responseBody = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
-        {
-            var error = await response.Content.ReadAsStringAsync();
-            _logger.LogError("Error enviando mensaje WhatsApp a {To}: {Error}", to, error);
-        }
+            _logger.LogError("Error WhatsApp {StatusCode} enviando a {To}: {Body}", (int)response.StatusCode, to, responseBody);
+        else
+            _logger.LogInformation("WhatsApp OK a {To}: {Body}", to, responseBody);
 
         return response.IsSuccessStatusCode;
     }
