@@ -261,6 +261,18 @@ public class TelegramService : BackgroundService
             "• /ayuda — mostrar este menú");
     }
 
+    public async Task EnviarMensajeAdmin(string mensaje)
+    {
+        try
+        {
+            await _bot.SendMessage(_adminId, mensaje);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error enviando mensaje al admin de Telegram");
+        }
+    }
+
     private Task HandleError(ITelegramBotClient bot, Exception ex, HandleErrorSource source, CancellationToken ct)
     {
         _logger.LogError(ex, "Error en Telegram polling ({Source})", source);

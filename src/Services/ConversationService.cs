@@ -10,19 +10,29 @@ public class ConversationService
     private readonly AIService _aiService;
     private readonly WhatsAppService _whatsAppService;
     private readonly FarmaciaConfig _farmacia;
+    private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<ConversationService> _logger;
+
+    private static readonly string[] PalabrasPedido =
+    [
+        "pedido", "delivery", "enviame", "enviá", "envíame", "enviar",
+        "quiero que me envíen", "quiero que me envien", "reservar", "reserva",
+        "mandar", "mandame", "mandá", "llevar", "necesito que me traigan"
+    ];
 
     public ConversationService(
         AppDbContext db,
         AIService aiService,
         WhatsAppService whatsAppService,
         FarmaciaConfig farmacia,
+        IServiceProvider serviceProvider,
         ILogger<ConversationService> logger)
     {
         _db = db;
         _aiService = aiService;
         _whatsAppService = whatsAppService;
         _farmacia = farmacia;
+        _serviceProvider = serviceProvider;
         _logger = logger;
     }
 
@@ -71,6 +81,40 @@ public class ConversationService
         _logger.LogInformation("[5/5] Enviando respuesta por WhatsApp a {Telefono}...", telefono);
         var enviado = await _whatsAppService.SendMessage(telefono, respuesta);
         _logger.LogInformation("[5/5] WhatsApp enviado={Enviado} simulacion={Simulacion}", enviado, _whatsAppService.SimulationMode);
+
+        if (EsPedido(texto, respuesta))
+        {
+            _logger.LogInformation("Pedido detectado de {Telefono} — notificando al farmacéutico", telefono);
+            await NotificarFarmaceutico(telefono, texto);
+        }
+    }
+
+    private static bool EsPedido(string textoCliente, string respuestaAI)
+    {
+        var combinado = (textoCliente + " " + respuestaAI).ToLowerInvariant();
+        return PalabrasPedido.Any(p => combinado.Contains(p));
+    }
+
+    private async Task NotificarFarmaceutico(string telefono, string textoPedido)
+    {
+        try
+        {
+            var telegramService = _serviceProvider.GetRequiredService<TelegramService>();
+            var mensaje =
+                $"⚠️ Pedido nuevo\n\n" +
+                $"👤 Cliente: {telefono}\n" +
+                $"🛒 Productos: {textoPedido}\n" +
+                $"📍 Delivery: {(_farmacia.Delivery ? "Sí" : "No")}\n\n" +
+                $"¿Qué hacés?\n" +
+                $"/tomar {telefono} — para hablar con el cliente\n" +
+                $"/fin — cuando esté resuelto";
+
+            await telegramService.EnviarMensajeAdmin(mensaje);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error notificando pedido al farmacéutico");
+        }
     }
 
     public async Task<Conversacion> ObtenerConversacionActiva(int clienteId)
