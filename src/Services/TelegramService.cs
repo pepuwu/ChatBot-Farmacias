@@ -222,13 +222,12 @@ public class TelegramService : BackgroundService
             return;
         }
 
-        _ofertaPendiente = oferta;
+        var mensajeGenerado = await GenerarMensajeOferta(oferta);
+        _ofertaPendiente = mensajeGenerado;
 
         var preview =
             $"📢 Vista previa de la oferta:\n\n" +
-            $"💊 Oferta {_farmacia.Nombre}\n\n" +
-            $"{oferta}\n\n" +
-            $"¿Querés que te reservemos uno? Respondé SÍ\n\n" +
+            $"{mensajeGenerado}\n\n" +
             $"Se enviará a {cantidadClientes} cliente(s). ¿Confirmás? Respondé 'sí' para enviar o 'no' para cancelar.";
 
         await _bot.SendMessage(chatId, preview);
@@ -245,10 +244,7 @@ public class TelegramService : BackgroundService
 
         var clientes = await db.Clientes.ToListAsync();
 
-        var mensaje =
-            $"💊 Oferta {_farmacia.Nombre}\n\n" +
-            $"{oferta}\n\n" +
-            $"¿Querés que te reservemos uno? Respondé SÍ";
+        var mensaje = oferta;
 
         var enviados = 0;
         var simulados = new List<string>();
@@ -279,6 +275,28 @@ public class TelegramService : BackgroundService
     {
         _ofertaPendiente = null;
         await _bot.SendMessage(chatId, "❌ Oferta cancelada.");
+    }
+
+    private async Task<string> GenerarMensajeOferta(string descripcion)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var aiService = scope.ServiceProvider.GetRequiredService<AIService>();
+
+            var prompt =
+                $"Sos el asistente de una farmacia argentina llamada {_farmacia.Nombre}. " +
+                $"Generá un mensaje corto y atractivo para WhatsApp anunciando esta oferta: {descripcion}. " +
+                $"Máximo 3 líneas, incluí emojis, tono amigable y argentino. " +
+                $"Solo devolvé el mensaje, sin explicaciones.";
+
+            return await aiService.GenerarMensajeLibre(prompt);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generando mensaje de oferta con IA, usando texto original");
+            return descripcion;
+        }
     }
 
     private async Task HandleAyuda(long chatId)

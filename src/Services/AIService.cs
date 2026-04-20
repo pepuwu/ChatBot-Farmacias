@@ -59,6 +59,23 @@ public class AIService
         }
     }
 
+    public async Task<string> GenerarMensajeLibre(string prompt)
+    {
+        _logger.LogInformation("OpenAI: generando mensaje libre");
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var messages = new List<ChatMessage> { ChatMessage.CreateUserMessage(prompt) };
+            var response = await _client.CompleteChatAsync(messages, cancellationToken: cts.Token);
+            return response.Value.Content[0].Text.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OpenAI: error generando mensaje libre");
+            throw;
+        }
+    }
+
     private string BuildSystemPrompt()
     {
         var obrasSociales = string.Join(", ", _farmacia.ObrasSociales);
