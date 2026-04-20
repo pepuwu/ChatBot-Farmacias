@@ -17,7 +17,9 @@ public class TelegramService : BackgroundService
     private readonly long _adminId;
     private readonly string? _webhookUrl;
     private readonly bool _useWebhook;
-    private string? _ofertaPendiente;
+
+    private record OfertaPendiente(string DescripcionOriginal, string MensajeActual);
+    private OfertaPendiente? _ofertaPendiente;
 
     public TelegramService(
         IConfiguration config,
@@ -112,6 +114,8 @@ public class TelegramService : BackgroundService
                 await ConfirmarOferta(chatId);
             else if (_ofertaPendiente is not null && text.Equals("no", StringComparison.OrdinalIgnoreCase))
                 await CancelarOferta(chatId);
+            else if (_ofertaPendiente is not null && text.StartsWith("editar", StringComparison.OrdinalIgnoreCase))
+                await EditarOferta(chatId, text);
             else if (text.StartsWith("/tomar"))
                 await HandleTomar(chatId, text);
             else if (text.StartsWith("/fin"))
@@ -222,20 +226,15 @@ public class TelegramService : BackgroundService
             return;
         }
 
-        var mensajeGenerado = await GenerarMensajeOferta(oferta);
-        _ofertaPendiente = mensajeGenerado;
+        var mensajeGenerado = await GenerarMensajeOferta(oferta, null);
+        _ofertaPendiente = new OfertaPendiente(oferta, mensajeGenerado);
 
-        var preview =
-            $"📢 Vista previa de la oferta:\n\n" +
-            $"{mensajeGenerado}\n\n" +
-            $"Se enviará a {cantidadClientes} cliente(s). ¿Confirmás? Respondé 'sí' para enviar o 'no' para cancelar.";
-
-        await _bot.SendMessage(chatId, preview);
+        await _bot.SendMessage(chatId, BuildPreview(mensajeGenerado, cantidadClientes));
     }
 
     private async Task ConfirmarOferta(long chatId)
     {
-        var oferta = _ofertaPendiente!;
+        var oferta = _ofertaPendiente!.MensajeActual;
         _ofertaPendiente = null;
 
         using var scope = _scopeFactory.CreateScope();
@@ -244,14 +243,12 @@ public class TelegramService : BackgroundService
 
         var clientes = await db.Clientes.ToListAsync();
 
-        var mensaje = oferta;
-
         var enviados = 0;
         var simulados = new List<string>();
 
         foreach (var cliente in clientes)
         {
-            var enviado = await whatsAppService.SendMessage(cliente.Telefono, mensaje);
+            var enviado = await whatsAppService.SendMessage(cliente.Telefono, oferta);
             if (enviado)
                 enviados++;
             else
@@ -277,18 +274,43 @@ public class TelegramService : BackgroundService
         await _bot.SendMessage(chatId, "❌ Oferta cancelada.");
     }
 
-    private async Task<string> GenerarMensajeOferta(string descripcion)
+    private async Task EditarOferta(long chatId, string text)
+    {
+        var parts = text.Split(' ', 2);
+        var instrucciones = parts.Length > 1 ? parts[1].Trim() : "";
+
+        if (string.IsNullOrWhiteSpace(instrucciones))
+        {
+            await _bot.SendMessage(chatId, "Indicá cómo querés modificar el mensaje. Ej: 'editar más formal y sin emojis'");
+            return;
+        }
+
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var cantidadClientes = await db.Clientes.CountAsync();
+
+        var nuevoMensaje = await GenerarMensajeOferta(_ofertaPendiente!.DescripcionOriginal, instrucciones);
+        _ofertaPendiente = _ofertaPendiente with { MensajeActual = nuevoMensaje };
+
+        await _bot.SendMessage(chatId, BuildPreview(nuevoMensaje, cantidadClientes));
+    }
+
+    private async Task<string> GenerarMensajeOferta(string descripcion, string? instrucciones)
     {
         try
         {
             using var scope = _scopeFactory.CreateScope();
             var aiService = scope.ServiceProvider.GetRequiredService<AIService>();
 
-            var prompt =
-                $"Sos el asistente de una farmacia argentina llamada {_farmacia.Nombre}. " +
-                $"Generá un mensaje corto y atractivo para WhatsApp anunciando esta oferta: {descripcion}. " +
-                $"Máximo 3 líneas, incluí emojis, tono amigable y argentino. " +
-                $"Solo devolvé el mensaje, sin explicaciones.";
+            var prompt = string.IsNullOrWhiteSpace(instrucciones)
+                ? $"Sos el asistente de una farmacia argentina llamada {_farmacia.Nombre}. " +
+                  $"Generá un mensaje corto y atractivo para WhatsApp anunciando esta oferta: {descripcion}. " +
+                  $"Máximo 3 líneas, incluí emojis, tono amigable y argentino. " +
+                  $"Solo devolvé el mensaje, sin explicaciones."
+                : $"Sos el asistente de una farmacia argentina llamada {_farmacia.Nombre}. " +
+                  $"Tenés este mensaje de oferta para WhatsApp: {descripcion}. " +
+                  $"Modificalo siguiendo estas instrucciones: {instrucciones}. " +
+                  $"Máximo 3 líneas. Solo devolvé el mensaje modificado, sin explicaciones.";
 
             return await aiService.GenerarMensajeLibre(prompt);
         }
@@ -298,6 +320,14 @@ public class TelegramService : BackgroundService
             return descripcion;
         }
     }
+
+    private static string BuildPreview(string mensaje, int cantidadClientes) =>
+        $"📣 Vista previa de la oferta:\n\n" +
+        $"{mensaje}\n\n" +
+        $"Se enviará a {cantidadClientes} cliente(s).\n" +
+        $"✅ 'sí' para enviar\n" +
+        $"✏️ 'editar [nuevo texto]' para modificar\n" +
+        $"❌ 'no' para cancelar";
 
     private async Task HandleAyuda(long chatId)
     {
