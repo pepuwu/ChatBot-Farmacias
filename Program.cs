@@ -30,12 +30,12 @@ var farmacia = JsonConvert.DeserializeObject<FarmaciaConfig>(farmaciaJson, snake
 
 builder.Services.AddSingleton(farmacia);
 
-// SQLite — un archivo .db por farmacia
-var dbPath = builder.Configuration["DB_PATH"] ?? farmacia.DbPath;
-Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(dbPath))!);
+// PostgreSQL
+var connectionString = builder.Configuration["DATABASE_URL"]
+    ?? throw new InvalidOperationException("La variable de entorno DATABASE_URL no está configurada.");
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}"));
+    options.UseNpgsql(connectionString));
 
 // HTTP client para WhatsApp
 builder.Services.AddHttpClient<WhatsAppService>();

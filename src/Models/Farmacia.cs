@@ -14,7 +14,6 @@ public class FarmaciaConfig
     public string MensajeBienvenida { get; set; } = "";
     public string MensajeDerivacion { get; set; } = "";
     public int TiempoSesionMinutos { get; set; } = 10;
-    public string DbPath { get; set; } = "./data/farmacia.db";
 }
 
 public class HorariosConfig
