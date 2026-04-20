@@ -31,8 +31,10 @@ var farmacia = JsonConvert.DeserializeObject<FarmaciaConfig>(farmaciaJson, snake
 builder.Services.AddSingleton(farmacia);
 
 // PostgreSQL
-var connectionString = builder.Configuration["DATABASE_URL"]
+var databaseUrl = builder.Configuration["DATABASE_URL"]
     ?? throw new InvalidOperationException("La variable de entorno DATABASE_URL no está configurada.");
+
+var connectionString = ConvertPostgresUrl(databaseUrl);
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(connectionString));
@@ -68,6 +70,13 @@ app.MapGet("/", () => $"Farmacia Agent — {farmacia.Nombre} — OK");
 app.MapGet("/health", () => Results.Ok(new { status = "ok", farmacia = farmacia.Nombre }));
 
 await app.RunAsync();
+
+static string ConvertPostgresUrl(string url)
+{
+    var uri = new Uri(url);
+    var userInfo = uri.UserInfo.Split(':');
+    return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={userInfo[0]};Password={userInfo[1]};SSL Mode=Require;Trust Server Certificate=true";
+}
 
 // Background service para cerrar sesiones inactivas cada minuto
 public class SessionCleanupService : BackgroundService
