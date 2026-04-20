@@ -17,6 +17,7 @@ public class TelegramService : BackgroundService
     private readonly long _adminId;
     private readonly string? _webhookUrl;
     private readonly bool _useWebhook;
+    private string? _ofertaPendiente;
 
     public TelegramService(
         IConfiguration config,
@@ -107,7 +108,11 @@ public class TelegramService : BackgroundService
 
         try
         {
-            if (text.StartsWith("/tomar"))
+            if (_ofertaPendiente is not null && (text.Equals("sí", StringComparison.OrdinalIgnoreCase) || text.Equals("si", StringComparison.OrdinalIgnoreCase)))
+                await ConfirmarOferta(chatId);
+            else if (_ofertaPendiente is not null && text.Equals("no", StringComparison.OrdinalIgnoreCase))
+                await CancelarOferta(chatId);
+            else if (text.StartsWith("/tomar"))
                 await HandleTomar(chatId, text);
             else if (text.StartsWith("/fin"))
                 await HandleFin(chatId);
@@ -209,15 +214,36 @@ public class TelegramService : BackgroundService
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var whatsAppService = scope.ServiceProvider.GetRequiredService<WhatsAppService>();
+        var cantidadClientes = await db.Clientes.CountAsync();
 
-        var clientes = await db.Clientes.ToListAsync();
-
-        if (clientes.Count == 0)
+        if (cantidadClientes == 0)
         {
             await _bot.SendMessage(chatId, "No hay clientes registrados aún.");
             return;
         }
+
+        _ofertaPendiente = oferta;
+
+        var preview =
+            $"📢 Vista previa de la oferta:\n\n" +
+            $"💊 Oferta {_farmacia.Nombre}\n\n" +
+            $"{oferta}\n\n" +
+            $"¿Querés que te reservemos uno? Respondé SÍ\n\n" +
+            $"Se enviará a {cantidadClientes} cliente(s). ¿Confirmás? Respondé 'sí' para enviar o 'no' para cancelar.";
+
+        await _bot.SendMessage(chatId, preview);
+    }
+
+    private async Task ConfirmarOferta(long chatId)
+    {
+        var oferta = _ofertaPendiente!;
+        _ofertaPendiente = null;
+
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var whatsAppService = scope.ServiceProvider.GetRequiredService<WhatsAppService>();
+
+        var clientes = await db.Clientes.ToListAsync();
 
         var mensaje =
             $"💊 Oferta {_farmacia.Nombre}\n\n" +
@@ -247,6 +273,12 @@ public class TelegramService : BackgroundService
         {
             await _bot.SendMessage(chatId, $"✅ Oferta enviada a {enviados} cliente(s).");
         }
+    }
+
+    private async Task CancelarOferta(long chatId)
+    {
+        _ofertaPendiente = null;
+        await _bot.SendMessage(chatId, "❌ Oferta cancelada.");
     }
 
     private async Task HandleAyuda(long chatId)
