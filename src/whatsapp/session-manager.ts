@@ -138,18 +138,28 @@ class SessionManager {
       if (connection === 'close') {
         entry.ready = false;
         const reason = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
-        const shouldReconnect = reason !== DisconnectReason.loggedOut;
-        logger.warn({ sessionId, reason }, 'WhatsApp desconectado');
+        const loggedOut = reason === DisconnectReason.loggedOut;
+        logger.warn({ sessionId, reason, loggedOut }, 'WhatsApp desconectado');
         this.sessions.delete(sessionId);
-        if (shouldReconnect) {
-          setTimeout(() => {
-            this.startSession(sessionId).catch((err) =>
-              logger.error({ err, sessionId }, 'Error reconectando sesión'),
+
+        const relaunch = async () => {
+          if (loggedOut) {
+            logger.error(
+              { sessionId, authDir },
+              '🗑️  Sesión deslogueada (401) — borrando credenciales y generando QR nuevo',
             );
-          }, 3000);
-        } else {
-          logger.error({ sessionId }, 'Sesión deslogueada — borrar carpeta y re-emparejar');
-        }
+            await fs.rm(authDir, { recursive: true, force: true }).catch((err) =>
+              logger.error({ err, authDir }, 'Error borrando carpeta de sesión'),
+            );
+          }
+          await this.startSession(sessionId).catch((err) =>
+            logger.error({ err, sessionId }, 'Error reiniciando sesión'),
+          );
+        };
+
+        setTimeout(() => {
+          relaunch().catch((err) => logger.error({ err, sessionId }, 'relaunch falló'));
+        }, loggedOut ? 500 : 3000);
       }
     });
 
