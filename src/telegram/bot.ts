@@ -172,8 +172,8 @@ export function buildTelegramBot() {
 
 export async function startTelegramBot() {
   const bot = buildTelegramBot();
-  // Launch en modo polling (no webhook)
-  bot.launch().catch((err) => logger.error({ err }, 'Error en bot de Telegram'));
+  await bot.telegram.deleteWebhook();
+  bot.launch().catch((err: unknown) => logger.error({ err }, 'Error en bot de Telegram'));
   logger.info('Bot de Telegram iniciado (polling)');
   return bot;
 }
