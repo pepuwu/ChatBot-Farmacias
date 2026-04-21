@@ -4,7 +4,7 @@ import { prisma } from './db.js';
 import { startServer } from './server.js';
 import { startAllPharmacySessions, registerPharmacyHandler } from './whatsapp/customer-bot.js';
 import { startAdminSession, registerAdminHandler } from './whatsapp/admin-bot.js';
-import { startTelegramBot } from './telegram/bot.js';
+import { buildTelegramBot, startTelegramBot } from './telegram/bot.js';
 import { startCleanupInterval } from './services/cleanup.js';
 
 async function main() {
@@ -17,11 +17,13 @@ async function main() {
   registerPharmacyHandler();
   registerAdminHandler();
 
-  // HTTP server para health checks
-  await startServer();
+  const tgBot = buildTelegramBot();
+
+  // HTTP server para health checks y webhook de Telegram en producción
+  await startServer(tgBot);
 
   // Bot de Telegram (super admin) — no depende de Baileys, lo arrancamos primero
-  const tgBot = await startTelegramBot();
+  await startTelegramBot(tgBot);
 
   // Sesiones de WhatsApp
   await startAdminSession();
@@ -35,7 +37,9 @@ async function main() {
   // Shutdown limpio
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Apagando...');
-    tgBot.stop(signal);
+    if (!config.TELEGRAM_WEBHOOK_URL) {
+      tgBot.stop(signal);
+    }
     await prisma.$disconnect();
     process.exit(0);
   };

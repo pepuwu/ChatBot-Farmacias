@@ -75,3 +75,16 @@ Las credenciales quedan persistidas en `./sessions/<sessionId>/`.
 2. Crear servicio web desde este repo (detecta Dockerfile).
 3. Variables de entorno: ver `.env.example`.
 4. Montar volumen persistente en `/app/sessions` para que no se pierdan las credenciales de Baileys entre deploys.
+
+### Telegram en Railway
+
+En producción conviene usar webhook para evitar el error `409 Conflict: terminated by other getUpdates request`, que aparece cuando dos procesos usan polling con el mismo token.
+
+Agregá estas variables en Railway:
+
+```bash
+TELEGRAM_WEBHOOK_URL=https://TU-DOMINIO.up.railway.app/telegram/webhook
+TELEGRAM_WEBHOOK_SECRET=un-secreto-largo
+```
+
+Si no definís `TELEGRAM_WEBHOOK_URL`, el bot usa polling como antes, útil para desarrollo local. Asegurate de no tener el bot corriendo localmente con el mismo `TELEGRAM_BOT_TOKEN` mientras Railway está activo.

@@ -170,10 +170,18 @@ export function buildTelegramBot() {
   return bot;
 }
 
-export async function startTelegramBot() {
-  const bot = buildTelegramBot();
+export async function startTelegramBot(bot = buildTelegramBot()) {
+  if (config.TELEGRAM_WEBHOOK_URL) {
+    await bot.telegram.setWebhook(
+      config.TELEGRAM_WEBHOOK_URL,
+      config.TELEGRAM_WEBHOOK_SECRET ? { secret_token: config.TELEGRAM_WEBHOOK_SECRET } : undefined,
+    );
+    logger.info({ url: config.TELEGRAM_WEBHOOK_URL }, 'Bot de Telegram iniciado (webhook)');
+    return bot;
+  }
+
   await bot.telegram.deleteWebhook();
-  bot.launch().catch((err: unknown) => logger.error({ err }, 'Error en bot de Telegram'));
+  await bot.launch();
   logger.info('Bot de Telegram iniciado (polling)');
   return bot;
 }

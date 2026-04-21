@@ -7,6 +7,8 @@ const schema = z.object({
   OPENAI_MODEL: z.string().default('gpt-4.1-nano'),
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_SUPER_ADMIN_ID: z.coerce.number().int(),
+  TELEGRAM_WEBHOOK_URL: z.string().url().optional(),
+  TELEGRAM_WEBHOOK_SECRET: z.string().min(1).optional(),
   ADMIN_WHATSAPP_NUMBER: z.string().min(1),
   PORT: z.coerce.number().int().default(8080),
   HOST: z.string().default('0.0.0.0'),
