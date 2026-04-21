@@ -15,7 +15,8 @@ export async function buildServer(telegramBot?: Telegraf<Context>) {
   });
 
   if (telegramBot && config.TELEGRAM_WEBHOOK_URL) {
-    app.post('/telegram/webhook', async (request, reply) => {
+    const webhookPath = new URL(config.TELEGRAM_WEBHOOK_URL).pathname || '/telegram/webhook';
+    app.post(webhookPath, async (request, reply) => {
       if (config.TELEGRAM_WEBHOOK_SECRET) {
         const secret = request.headers['x-telegram-bot-api-secret-token'];
         if (secret !== config.TELEGRAM_WEBHOOK_SECRET) {
@@ -27,6 +28,7 @@ export async function buildServer(telegramBot?: Telegraf<Context>) {
       await telegramBot.handleUpdate(request.body as Parameters<typeof telegramBot.handleUpdate>[0]);
       return { ok: true };
     });
+    logger.info({ webhookPath }, 'Telegram webhook route registrado');
   }
 
   return app;

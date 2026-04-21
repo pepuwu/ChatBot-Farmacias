@@ -213,12 +213,16 @@ export async function startTelegramBot(bot = buildTelegramBot()) {
       config.TELEGRAM_WEBHOOK_URL,
       config.TELEGRAM_WEBHOOK_SECRET ? { secret_token: config.TELEGRAM_WEBHOOK_SECRET } : undefined,
     );
-    logger.info({ url: config.TELEGRAM_WEBHOOK_URL }, 'Bot de Telegram iniciado (webhook)');
+    const info = await bot.telegram.getWebhookInfo();
+    logger.info(
+      { url: info.url, pending: info.pending_update_count, lastError: info.last_error_message },
+      'Bot de Telegram iniciado (webhook)',
+    );
     return bot;
   }
 
   await bot.telegram.deleteWebhook();
-  await bot.launch();
+  bot.launch().catch((err) => logger.error({ err }, 'bot.launch() falló'));
   logger.info('Bot de Telegram iniciado (polling)');
   return bot;
 }
