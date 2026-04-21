@@ -193,7 +193,15 @@ export function buildTelegramBot() {
  * sesión de WhatsApp (admin o farmacia), como imagen PNG.
  */
 export function registerQRPushToSuperAdmin(bot: Telegraf) {
+  const lastSentAt = new Map<string, number>();
+  const COOLDOWN_MS = 60_000;
+
   return sessionManager.onQR(async (sessionId, qr) => {
+    const now = Date.now();
+    const last = lastSentAt.get(sessionId) ?? 0;
+    if (now - last < COOLDOWN_MS) return;
+    lastSentAt.set(sessionId, now);
+
     try {
       const png = await QRCode.toBuffer(qr);
       await bot.telegram.sendPhoto(
