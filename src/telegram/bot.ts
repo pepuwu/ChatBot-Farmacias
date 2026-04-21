@@ -76,9 +76,10 @@ export function buildTelegramBot() {
       return ctx.reply(
         `✅ Farmacia creada.\nid: ${f.id}\n\nEscaneá el QR que aparece en los logs del servidor para emparejar el número ${whatsappNumber}.`,
       );
-    } catch (err: any) {
+    } catch (err: unknown) {
       logger.error({ err }, 'Error creando farmacia');
-      return ctx.reply(`❌ Error: ${err?.message ?? 'desconocido'}`);
+      const msg = err instanceof Error ? err.message : 'desconocido';
+      return ctx.reply(`❌ Error: ${msg}`);
     }
   });
 
@@ -96,9 +97,10 @@ export function buildTelegramBot() {
         data: { farmaciaId, whatsappNumber, nombre },
       });
       return ctx.reply(`✅ Farmacéutico registrado.\nid: ${admin.id}\nwa: ${admin.whatsappNumber}`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       logger.error({ err }, 'Error creando admin');
-      return ctx.reply(`❌ Error: ${err?.message ?? 'desconocido'}`);
+      const msg = err instanceof Error ? err.message : 'desconocido';
+      return ctx.reply(`❌ Error: ${msg}`);
     }
   });
 

@@ -7,6 +7,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   type WASocket,
   type proto,
+  type UserFacingSocketConfig,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { config } from '../config.js';
@@ -57,7 +58,7 @@ class SessionManager {
       version,
       auth: state,
       printQRInTerminal: false,
-      logger: logger.child({ session: sessionId }) as any,
+      logger: logger.child({ session: sessionId }) as UserFacingSocketConfig['logger'],
       browser: ['ChatbotFarmacias', 'Chrome', '1.0'],
       markOnlineOnConnect: false,
     });

@@ -295,8 +295,9 @@ async function handleAgregarEspera(remitente: string, farmacia: Farmacia, text: 
     } else {
       await reply(remitente, `✅ ${telefono} agregado a lista de espera para: ${producto}`);
     }
-  } catch (err: any) {
-    await reply(remitente, `❌ ${err?.message ?? 'Error al agregar a lista de espera'}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error al agregar a lista de espera';
+    await reply(remitente, `❌ ${msg}`);
   }
 }
 
