@@ -1,95 +1,77 @@
-# Farmacia Agent — Farmacia San Martín
+# Chatbot Farmacias — Multi-farmacia
 
-Bot de WhatsApp para clientes + bot de Telegram para el farmacéutico admin.
+Sistema multi-tenant para farmacias:
+- **Bot de WhatsApp (Baileys)** por farmacia, atiende clientes con IA 24/7.
+- **Bot admin de WhatsApp (Baileys)** compartido: los farmacéuticos mandan comandos a este número y reciben notificaciones de pedidos.
+- **Bot de Telegram (Telegraf)** para vos (super-admin): dar de alta farmacias, farmacéuticos y ver estado del sistema.
 
 ## Stack
-- ASP.NET Core 8 (C#)
-- SQLite con Entity Framework Core (un archivo `.db` por farmacia)
-- WhatsApp: Meta Cloud API
-- Telegram: Telegram Bot API (polling)
-- IA: OpenAI gpt-4.1-nano
 
----
+- TypeScript + Node 20
+- Fastify (health checks)
+- [@whiskeysockets/baileys](https://github.com/WhiskeySockets/Baileys) — WhatsApp sin API oficial
+- Telegraf — Telegram
+- Prisma + PostgreSQL (Railway)
+- OpenAI SDK
 
-## Setup local
+## Arquitectura
 
-### 1. Clonar y configurar variables de entorno
+```
+Cliente ── WhatsApp ──▶ [Sesión Baileys "pharmacy:<id>"] ──▶ IA ──▶ respuesta
+                                                │
+                                                └─ pedido detectado ──▶ notifica al admin WhatsApp
+                                                                           │
+Farmacéutico ── WhatsApp ──▶ [Sesión Baileys "admin"] ──▶ comandos (/tomar /fin /oferta…)
+                                                            │
+                                                            └─ al tomar control, mensajes se
+                                                               reenvían desde la sesión de su farmacia
+Super-admin (vos) ── Telegram ──▶ Telegraf bot ──▶ gestión de farmacias
+```
+
+Cada farmacia se guarda en la tabla `Farmacia`. Los farmacéuticos (tabla `Admin`) se identifican por su número de WhatsApp.
+
+## Setup
 
 ```bash
 cp .env.example .env
-# Editar .env con tus tokens
+# editar .env
+npm install
+npm run prisma:push      # o prisma migrate deploy si ya hay migraciones
+npm run build
+npm start                # o npm run dev para hot-reload
 ```
 
-### 2. Editar `config/farmacia.json`
+La primera vez que arranca cada sesión de WhatsApp va a imprimir un **QR en la consola**. Escanealo con el teléfono correspondiente.
 
-Completar con los datos reales de la farmacia.
+- La sesión `admin` pertenece a tu número admin (el que recibe comandos de todos los farmacéuticos).
+- Las sesiones `pharmacy:<id>` son una por farmacia — el dueño del número escanea el QR.
 
-### 3. Correr con Docker
+Las credenciales quedan persistidas en `./sessions/<sessionId>/`.
 
-```bash
-docker-compose up --build
-```
+## Uso
 
-### 4. Correr sin Docker
+### Como super-admin (Telegram)
 
-```bash
-dotnet run
-```
+- `/nueva_farmacia <nombre>|<whatsappNumber>|<direccion>`
+- `/nuevo_admin <farmaciaId>|<whatsappNumber>|<nombre>`
+- `/farmacias` — lista
+- `/farmacia <id>` — detalle
+- `/activar <id>` / `/desactivar <id>`
+- `/sesiones` — estado de las sesiones
+- `/qr <farmaciaId>` — forzar re-escaneo
 
----
+### Como farmacéutico (WhatsApp al número admin)
 
-## Deploy en Railway
+- `/tomar <número>` — tomar control de una conversación
+- Cualquier mensaje sin `/` se reenvía al cliente
+- `/fin` — devolver conversaciones al bot
+- `/cola` — clientes en espera
+- `/oferta <texto>` — IA genera el mensaje, confirmás con `sí`/`editar…`/`no`
+- `/ayuda`
 
-1. Crear un nuevo proyecto en Railway.
-2. Conectar este repositorio.
-3. En **Variables**, cargar todas las variables de `.env.example`.
-4. Railway detecta el `Dockerfile` automáticamente.
-5. Para el webhook de WhatsApp, configurar en Meta la URL:
-   `https://tu-app.railway.app/api/whatsapp`
+## Deploy (Railway)
 
----
-
-## Comandos del bot de Telegram (admin)
-
-| Comando | Acción |
-|---|---|
-| `/stock` | Ver todo el stock actual |
-| `/tomar [número]` | Tomar control de la conversación con ese cliente |
-| `/fin` | Liberar control y devolvérselo al bot |
-| `/cola` | Ver clientes en espera |
-| `/alertas` | Ver productos con stock bajo |
-| `"Llegaron 50 ibuprofeno 400mg"` | Actualizar stock en lenguaje natural |
-
----
-
-## Estructura del proyecto
-
-```
-FarmaciaAgent/
-  src/
-    Controllers/
-      WhatsAppController.cs   # Webhook de Meta
-      TelegramController.cs   # Endpoint opcional para webhooks
-    Services/
-      WhatsAppService.cs      # Envío de mensajes vía Meta API
-      TelegramService.cs      # Polling + comandos admin
-      StockService.cs         # CRUD de stock en SQLite
-      ConversationService.cs  # Estado de conversaciones
-      AIService.cs            # Integración OpenAI
-    Models/
-      Farmacia.cs             # Config de la farmacia
-      Stock.cs                # Entidad Producto
-      Cliente.cs              # Entidad Cliente
-      Mensaje.cs              # Entidades Conversacion, Mensaje, ListaEspera
-    Data/
-      AppDbContext.cs         # EF Core context
-  config/
-    farmacia.json             # Configuración de la farmacia
-  data/
-    farmacia-san-martin.db    # Base de datos SQLite (generada automáticamente)
-  Program.cs
-  FarmaciaAgent.csproj
-  Dockerfile
-  docker-compose.yml
-  .env.example
-```
+1. Crear servicio Postgres y obtener `DATABASE_URL`.
+2. Crear servicio web desde este repo (detecta Dockerfile).
+3. Variables de entorno: ver `.env.example`.
+4. Montar volumen persistente en `/app/sessions` para que no se pierdan las credenciales de Baileys entre deploys.

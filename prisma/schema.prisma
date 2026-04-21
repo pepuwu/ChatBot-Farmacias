@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Farmacia {
+  id                  String   @id @default(cuid())
+  nombre              String
+  whatsappNumber      String   @unique
+  direccion           String   @default("")
+  // Horarios libres como JSON: { semana: "...", sabado: "...", domingo: "..." }
+  horarios            Json     @default("{}")
+  delivery            Boolean  @default(true)
+  zonaDelivery        String   @default("")
+  obrasSociales       String[] @default([])
+  servicios           String[] @default([])
+  // Prompt opcional custom — si está presente, pisa el prompt por defecto
+  promptSistema       String?
+  mensajeBienvenida   String   @default("")
+  mensajeDerivacion   String   @default("Para eso te comunico con nuestro farmacéutico.")
+  tiempoSesionMinutos Int      @default(10)
+  activa              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  admins         Admin[]
+  clientes       Cliente[]
+  conversaciones Conversacion[]
+}
+
+model Admin {
+  id             String   @id @default(cuid())
+  whatsappNumber String   @unique
+  nombre         String   @default("")
+  farmaciaId     String
+  farmacia       Farmacia @relation(fields: [farmaciaId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+}
+
+model Cliente {
+  id                String   @id @default(cuid())
+  farmaciaId        String
+  farmacia          Farmacia @relation(fields: [farmaciaId], references: [id], onDelete: Cascade)
+  telefono          String
+  nombre            String   @default("")
+  ultimaInteraccion DateTime @default(now())
+
+  conversaciones Conversacion[]
+
+  @@unique([farmaciaId, telefono])
+}
+
+model Conversacion {
+  id         String   @id @default(cuid())
+  clienteId  String
+  cliente    Cliente  @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  farmaciaId String
+  farmacia   Farmacia @relation(fields: [farmaciaId], references: [id], onDelete: Cascade)
+  // bot | farmaceutico | espera | cerrada
+  estado     String   @default("bot")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  mensajes Mensaje[]
+
+  @@index([clienteId, updatedAt])
+  @@index([estado])
+}
+
+model Mensaje {
+  id             String       @id @default(cuid())
+  conversacionId String
+  conversacion   Conversacion @relation(fields: [conversacionId], references: [id], onDelete: Cascade)
+  // user | assistant | farmaceutico
+  role           String
+  contenido      String
+  createdAt      DateTime     @default(now())
+
+  @@index([conversacionId, createdAt])
+}

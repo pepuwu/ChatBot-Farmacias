@@ -1,21 +1,6 @@
-# Datos sensibles — nunca subir
+node_modules
+dist
 .env
-*.db
-*.db-shm
-*.db-wal
-
-# Build output
-bin/
-obj/
-
-# Rider / VS / VSCode
-.idea/
-.vscode/
-*.user
-*.suo
-
-# Logs
+sessions
 *.log
-
-# macOS
 .DS_Store

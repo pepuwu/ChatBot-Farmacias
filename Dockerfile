@@ -1,21 +1,26 @@
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM node:20-alpine AS build
 WORKDIR /app
 
-COPY *.csproj ./
-RUN dotnet restore
+COPY package*.json ./
+COPY tsconfig.json ./
+COPY prisma ./prisma
+RUN npm ci
 
-COPY . ./
-RUN dotnet publish -c Release -o out
+COPY src ./src
+RUN npx prisma generate && npx tsc
 
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+FROM node:20-alpine AS runtime
 WORKDIR /app
 
-COPY --from=build /app/out .
+COPY package*.json ./
+COPY prisma ./prisma
+RUN npm ci --omit=dev && npx prisma generate
 
-# Crear directorio para la base de datos
-RUN mkdir -p /app/data
+COPY --from=build /app/dist ./dist
+
+RUN mkdir -p /app/sessions
 
 EXPOSE 8080
-ENV ASPNETCORE_URLS=http://+:8080
+ENV NODE_ENV=production
 
-ENTRYPOINT ["dotnet", "FarmaciaAgent.dll"]
+CMD ["node", "dist/index.js"]
