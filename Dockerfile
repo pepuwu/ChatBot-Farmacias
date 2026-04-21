@@ -24,10 +24,11 @@ RUN npm ci --omit=dev
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 
 COPY --from=build /app/dist ./dist
+COPY scripts/start.sh ./start.sh
 
-RUN mkdir -p /app/sessions
+RUN mkdir -p /app/sessions && chmod +x /app/start.sh
 
 EXPOSE 8080
 ENV NODE_ENV=production
 
-CMD ["sh", "-c", "npx prisma db push && node dist/index.js"]
+CMD ["/app/start.sh"]
