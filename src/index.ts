@@ -4,7 +4,7 @@ import { prisma } from './db.js';
 import { startServer } from './server.js';
 import { startAllPharmacySessions, registerPharmacyHandler } from './whatsapp/customer-bot.js';
 import { startAdminSession, registerAdminHandler } from './whatsapp/admin-bot.js';
-import { buildTelegramBot, startTelegramBot } from './telegram/bot.js';
+import { buildTelegramBot, startTelegramBot, registerQRPushToSuperAdmin } from './telegram/bot.js';
 import { startCleanupInterval } from './services/cleanup.js';
 
 async function main() {
@@ -24,6 +24,9 @@ async function main() {
 
   // Bot de Telegram (super admin) — no depende de Baileys, lo arrancamos primero
   await startTelegramBot(tgBot);
+
+  // Cualquier QR de Baileys se manda como imagen al super admin por Telegram
+  registerQRPushToSuperAdmin(tgBot);
 
   // Sesiones de WhatsApp
   await startAdminSession();

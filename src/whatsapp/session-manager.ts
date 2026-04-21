@@ -33,10 +33,16 @@ class SessionManager {
   private sessions = new Map<string, SessionEntry>();
   private handlers = new Set<MessageHandler>();
   private qrWaiters = new Map<string, Set<(qr: string) => void>>();
+  private qrListeners = new Set<(sessionId: string, qr: string) => void>();
 
   onMessage(handler: MessageHandler) {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
+  }
+
+  onQR(listener: (sessionId: string, qr: string) => void) {
+    this.qrListeners.add(listener);
+    return () => this.qrListeners.delete(listener);
   }
 
   waitForQR(sessionId: string, timeoutMs = 60000): Promise<string> {
@@ -97,6 +103,9 @@ class SessionManager {
         qrcode.generate(qr, { small: true });
         const waiters = this.qrWaiters.get(sessionId);
         if (waiters) for (const h of waiters) h(qr);
+        for (const l of this.qrListeners) {
+          try { l(sessionId, qr); } catch (err) { logger.error({ err }, 'QR listener falló'); }
+        }
       }
 
       if (connection === 'open') {
