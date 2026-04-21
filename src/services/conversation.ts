@@ -7,22 +7,34 @@ const PALABRAS_PEDIDO = [
   'pedido', 'delivery', 'enviame', 'enviá', 'envíame', 'enviar',
   'quiero que me envíen', 'quiero que me envien', 'reservar', 'reserva',
   'mandar', 'mandame', 'mandá', 'llevar', 'necesito que me traigan',
+  'a domicilio', 'me lo mandas', 'me lo mandás',
 ];
 
-/** Resultado de procesar un mensaje entrante del cliente. */
 export interface HandleResult {
-  respuesta: string | null;      // texto a enviar al cliente (null si la conv está en modo farmacéutico)
-  pedidoDetectado: boolean;      // si hay que notificar al farmacéutico
+  respuesta: string | null;
+  pedidoDetectado: boolean;
+  esClienteNuevo: boolean;
   conversacionId: string;
   clienteTelefono: string;
 }
 
 async function obtenerOCrearCliente(farmaciaId: string, telefono: string) {
-  return prisma.cliente.upsert({
+  let esNuevo = false;
+  const existente = await prisma.cliente.findUnique({
     where: { farmaciaId_telefono: { farmaciaId, telefono } },
-    update: { ultimaInteraccion: new Date() },
-    create: { farmaciaId, telefono, nombre: telefono, ultimaInteraccion: new Date() },
   });
+  if (!existente) {
+    esNuevo = true;
+    const creado = await prisma.cliente.create({
+      data: { farmaciaId, telefono, nombre: telefono, ultimaInteraccion: new Date() },
+    });
+    return { cliente: creado, esNuevo };
+  }
+  await prisma.cliente.update({
+    where: { id: existente.id },
+    data: { ultimaInteraccion: new Date() },
+  });
+  return { cliente: existente, esNuevo };
 }
 
 async function obtenerConversacionActiva(farmacia: Farmacia, clienteId: string): Promise<Conversacion> {
@@ -64,10 +76,10 @@ export async function handleIncomingMessage(
 ): Promise<HandleResult> {
   logger.info({ farmacia: farmacia.nombre, telefono, texto }, 'Mensaje entrante');
 
-  const cliente = await obtenerOCrearCliente(farmacia.id, telefono);
+  const { cliente, esNuevo } = await obtenerOCrearCliente(farmacia.id, telefono);
   const conversacion = await obtenerConversacionActiva(farmacia, cliente.id);
 
-  // Si el farmacéutico está llevando la conversación, no responder con bot.
+  // Farmacéutico al mando → bot silenciado, solo guardar el mensaje
   if (conversacion.estado === 'farmaceutico') {
     await prisma.mensaje.create({
       data: { conversacionId: conversacion.id, role: 'user', contenido: texto },
@@ -76,7 +88,13 @@ export async function handleIncomingMessage(
       where: { id: conversacion.id },
       data: { updatedAt: new Date() },
     });
-    return { respuesta: null, pedidoDetectado: false, conversacionId: conversacion.id, clienteTelefono: telefono };
+    return {
+      respuesta: null,
+      pedidoDetectado: false,
+      esClienteNuevo: false,
+      conversacionId: conversacion.id,
+      clienteTelefono: telefono,
+    };
   }
 
   await prisma.mensaje.create({
@@ -84,7 +102,7 @@ export async function handleIncomingMessage(
   });
 
   const historial = await obtenerHistorial(conversacion.id);
-  const respuesta = await generarRespuesta(farmacia, historial, texto);
+  const respuesta = await generarRespuesta(farmacia, historial, texto, esNuevo);
 
   await prisma.mensaje.create({
     data: { conversacionId: conversacion.id, role: 'assistant', contenido: respuesta },
@@ -97,6 +115,7 @@ export async function handleIncomingMessage(
   return {
     respuesta,
     pedidoDetectado: esPedido(texto, respuesta),
+    esClienteNuevo: esNuevo,
     conversacionId: conversacion.id,
     clienteTelefono: telefono,
   };
@@ -144,5 +163,50 @@ export async function getConversacionesEnEspera(farmaciaId: string) {
     where: { farmaciaId, estado: 'espera' },
     include: { cliente: true },
     orderBy: { updatedAt: 'asc' },
+  });
+}
+
+// ─── Lista de espera ──────────────────────────────────────────────────────────
+
+export async function agregarAListaEspera(farmaciaId: string, telefono: string, producto: string) {
+  const cliente = await prisma.cliente.findUnique({
+    where: { farmaciaId_telefono: { farmaciaId, telefono } },
+  });
+  if (!cliente) throw new Error(`Cliente ${telefono} no encontrado en farmacia ${farmaciaId}`);
+
+  // No duplicar si ya está esperando el mismo producto
+  const yaEsta = await prisma.listaEspera.findFirst({
+    where: { farmaciaId, clienteId: cliente.id, producto: { equals: producto, mode: 'insensitive' }, notificado: false },
+  });
+  if (yaEsta) return null;
+
+  return prisma.listaEspera.create({
+    data: { farmaciaId, clienteId: cliente.id, producto },
+  });
+}
+
+export async function getListaEspera(farmaciaId: string) {
+  return prisma.listaEspera.findMany({
+    where: { farmaciaId, notificado: false },
+    include: { cliente: true },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+export async function getClientesEsperandoProducto(farmaciaId: string, producto: string) {
+  return prisma.listaEspera.findMany({
+    where: {
+      farmaciaId,
+      notificado: false,
+      producto: { contains: producto, mode: 'insensitive' },
+    },
+    include: { cliente: true },
+  });
+}
+
+export async function marcarNotificados(ids: string[]) {
+  return prisma.listaEspera.updateMany({
+    where: { id: { in: ids } },
+    data: { notificado: true },
   });
 }

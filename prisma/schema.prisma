@@ -12,13 +12,13 @@ model Farmacia {
   nombre              String
   whatsappNumber      String   @unique
   direccion           String   @default("")
-  // Horarios libres como JSON: { semana: "...", sabado: "...", domingo: "..." }
+  // { semana: "...", sabado: "...", domingo: "..." }
   horarios            Json     @default("{}")
   delivery            Boolean  @default(true)
   zonaDelivery        String   @default("")
   obrasSociales       String[] @default([])
   servicios           String[] @default([])
-  // Prompt opcional custom — si está presente, pisa el prompt por defecto
+  // Prompt custom — si está presente pisa el prompt por defecto
   promptSistema       String?
   mensajeBienvenida   String   @default("")
   mensajeDerivacion   String   @default("Para eso te comunico con nuestro farmacéutico.")
@@ -30,6 +30,7 @@ model Farmacia {
   admins         Admin[]
   clientes       Cliente[]
   conversaciones Conversacion[]
+  listaEspera    ListaEspera[]
 }
 
 model Admin {
@@ -50,6 +51,7 @@ model Cliente {
   ultimaInteraccion DateTime @default(now())
 
   conversaciones Conversacion[]
+  listaEspera    ListaEspera[]
 
   @@unique([farmaciaId, telefono])
 }
@@ -81,4 +83,18 @@ model Mensaje {
   createdAt      DateTime     @default(now())
 
   @@index([conversacionId, createdAt])
+}
+
+// Lista de espera para productos sin stock
+model ListaEspera {
+  id         String   @id @default(cuid())
+  farmaciaId String
+  farmacia   Farmacia @relation(fields: [farmaciaId], references: [id], onDelete: Cascade)
+  clienteId  String
+  cliente    Cliente  @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  producto   String
+  notificado Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([farmaciaId, notificado])
 }

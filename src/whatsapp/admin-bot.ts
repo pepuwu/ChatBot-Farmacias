@@ -1,56 +1,52 @@
 import type { Farmacia } from '@prisma/client';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { config } from '../config.js';
 import { sessionManager, type IncomingMessage } from './session-manager.js';
 import {
+  agregarAListaEspera,
   cambiarEstadoConversacion,
+  getClientesEsperandoProducto,
   getConversacionesEnEspera,
+  getListaEspera,
   liberarConversacionesDeFarmacia,
+  marcarNotificados,
   tomarControl,
 } from '../services/conversation.js';
 import { generarMensajeOferta } from '../ai/openai.js';
 
-const PHARMACY_PREFIX = 'pharmacy:';
-function pharmacySessionId(farmaciaId: string): string {
-  return `${PHARMACY_PREFIX}${farmaciaId}`;
-}
-
-async function sendFromPharmacy(farmaciaId: string, telefonoCliente: string, text: string) {
-  await sessionManager.sendText(pharmacySessionId(farmaciaId), telefonoCliente, text);
-}
-
-async function getClientesCount(farmaciaId: string): Promise<number> {
-  return prisma.cliente.count({ where: { farmaciaId } });
-}
-
-async function getClientesTelefonos(farmaciaId: string): Promise<string[]> {
-  const clientes = await prisma.cliente.findMany({
-    where: { farmaciaId },
-    select: { telefono: true },
-  });
-  return clientes.map((c) => c.telefono);
-}
-
-/** Session ID fija de la sesión admin compartida. */
 export const ADMIN_SESSION_ID = 'admin';
 
-/** Estado efímero por farmacéutico: borrador de oferta en confirmación. */
+const PHARMACY_PREFIX = 'pharmacy:';
+function pharmacySessionId(farmaciaId: string) {
+  return `${PHARMACY_PREFIX}${farmaciaId}`;
+}
+async function sendFromPharmacy(farmaciaId: string, telefono: string, text: string) {
+  await sessionManager.sendText(pharmacySessionId(farmaciaId), telefono, text);
+}
+async function getClientesCount(farmaciaId: string) {
+  return prisma.cliente.count({ where: { farmaciaId } });
+}
+async function getClientesTelefonos(farmaciaId: string) {
+  const rows = await prisma.cliente.findMany({ where: { farmaciaId }, select: { telefono: true } });
+  return rows.map((r) => r.telefono);
+}
+
 interface OfertaPendiente {
   farmaciaId: string;
   descripcionOriginal: string;
   mensajeActual: string;
 }
-
-/** Conversación activa "tomada" por un farmacéutico: mapea farmacéutico → cliente al que está respondiendo. */
 interface ControlActivo {
   farmaciaId: string;
   telefonoCliente: string;
   conversacionId: string;
 }
 
-const ofertasPendientes = new Map<string, OfertaPendiente>(); // key: whatsappNumber del farmacéutico
-const controlesActivos = new Map<string, ControlActivo>();     // key: whatsappNumber del farmacéutico
+// Estado en memoria por farmacéutico
+const ofertasPendientes = new Map<string, OfertaPendiente>();
+const controlesActivos = new Map<string, ControlActivo>();
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
 
 export async function startAdminSession() {
   await sessionManager.startSession(ADMIN_SESSION_ID);
@@ -58,61 +54,53 @@ export async function startAdminSession() {
 
 export function registerAdminHandler() {
   return sessionManager.onMessage(async (sessionId, msg) => {
-    if (sessionId !== ADMIN_SESSION_ID) return;
-    if (msg.isFromMe) return;
+    if (sessionId !== ADMIN_SESSION_ID || msg.isFromMe) return;
     await handleAdminMessage(msg);
   });
 }
 
-async function enviarAdmin(telefono: string, text: string) {
+// ─── Envío ───────────────────────────────────────────────────────────────────
+
+async function reply(telefono: string, text: string) {
   try {
     await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
   } catch (err) {
-    logger.error({ err, telefono }, 'Error enviando mensaje desde sesión admin');
+    logger.error({ err, telefono }, 'Error enviando desde sesión admin');
   }
 }
 
-/**
- * Notifica al farmacéutico (admin de la farmacia) cuando se detecta un pedido.
- * Se manda desde la sesión admin a todos los admins registrados para esa farmacia.
- */
+// ─── Notificación de pedido ──────────────────────────────────────────────────
+
 export async function notificarPedido(farmacia: Farmacia, telefonoCliente: string, textoPedido: string) {
   const admins = await prisma.admin.findMany({ where: { farmaciaId: farmacia.id } });
   if (admins.length === 0) {
-    logger.warn({ farmaciaId: farmacia.id }, 'Pedido detectado pero la farmacia no tiene admins cargados');
+    logger.warn({ farmaciaId: farmacia.id }, 'Pedido sin admins registrados');
     return;
   }
 
-  const mensaje =
-    `⚠️ Pedido nuevo — ${farmacia.nombre}\n\n` +
+  const msg =
+    `⚠️ Pedido nuevo - ${farmacia.nombre}\n\n` +
     `👤 Cliente: ${telefonoCliente}\n` +
-    `🛒 Mensaje: ${textoPedido}\n` +
-    `📍 Delivery: ${farmacia.delivery ? 'Sí' : 'No'}\n\n` +
-    `Respondé:\n` +
-    `/tomar ${telefonoCliente} — para hablar con el cliente\n` +
-    `/fin — cuando esté resuelto`;
+    `🛒 Productos: ${textoPedido}\n\n` +
+    `Respondé "tomar ${telefonoCliente}" para atenderlo`;
 
   for (const a of admins) {
-    await enviarAdmin(a.whatsappNumber, mensaje);
+    await reply(a.whatsappNumber, msg);
   }
 }
 
-async function admitirFarmaceutico(whatsappNumber: string) {
-  const admin = await prisma.admin.findUnique({
-    where: { whatsappNumber },
-    include: { farmacia: true },
-  });
-  return admin;
-}
+// ─── Router principal ────────────────────────────────────────────────────────
 
 async function handleAdminMessage(msg: IncomingMessage) {
   const remitente = msg.phoneNumber;
 
-  // Super admin (vos) puede usar el mismo número pero su admin principal es Telegram.
-  // Aquí solo contemplamos farmacéuticos registrados.
-  const admin = await admitirFarmaceutico(remitente);
+  const admin = await prisma.admin.findUnique({
+    where: { whatsappNumber: remitente },
+    include: { farmacia: true },
+  });
+
   if (!admin) {
-    await enviarAdmin(remitente, 'No estás registrado como farmacéutico. Contactá al administrador del sistema.');
+    await reply(remitente, 'No estás registrado como farmacéutico. Contactá al administrador del sistema.');
     return;
   }
 
@@ -120,42 +108,67 @@ async function handleAdminMessage(msg: IncomingMessage) {
   const text = msg.text.trim();
   const lower = text.toLowerCase();
 
-  logger.info({ remitente, farmacia: farmacia.nombre, text }, 'Comando de farmacéutico');
+  logger.info({ remitente, farmacia: farmacia.nombre, text }, 'Msg de farmacéutico');
 
+  // ── Oferta pendiente de confirmación ──
   const pendiente = ofertasPendientes.get(remitente);
   if (pendiente) {
-    if (lower === 'sí' || lower === 'si') return confirmarOferta(remitente, pendiente);
-    if (lower === 'no') return cancelarOferta(remitente);
-    if (lower.startsWith('editar ')) return editarOferta(remitente, pendiente, text.slice(7).trim());
+    if (lower === 'sí' || lower === 'si') { await confirmarOferta(remitente, pendiente); return; }
+    if (lower === 'no') { await cancelarOferta(remitente); return; }
+    if (lower.startsWith('editar ')) { await editarOferta(remitente, pendiente, text.slice(7).trim()); return; }
   }
 
-  // Si el farmacéutico ya tiene tomada una conversación y escribe un texto normal,
-  // lo reenviamos al cliente desde la sesión de la farmacia.
+  // ── Control activo: reenviar texto libre al cliente ──
   const control = controlesActivos.get(remitente);
-  if (control && !text.startsWith('/') && !pendiente) {
-    return reenviarAlCliente(remitente, control, text);
-  }
-
-  if (text.startsWith('/tomar')) return handleTomar(remitente, farmacia, text);
-  if (text.startsWith('/fin')) return handleFin(remitente, farmacia);
-  if (text.startsWith('/cola')) return handleCola(remitente, farmacia);
-  if (text.startsWith('/oferta')) return handleOferta(remitente, farmacia, text);
-  if (text === '/start' || text.startsWith('/ayuda') || text === '/help') return handleAyuda(remitente, farmacia);
-
-  return handleAyuda(remitente, farmacia);
-}
-
-async function handleTomar(remitente: string, farmacia: Farmacia, text: string) {
-  const [, telefonoRaw] = text.split(/\s+/, 2);
-  if (!telefonoRaw) {
-    await enviarAdmin(remitente, 'Uso: /tomar [número del cliente]');
+  if (control && !esComando(lower)) {
+    await reenviarAlCliente(remitente, control, text);
     return;
   }
-  const telefono = telefonoRaw.replace(/[^0-9]/g, '');
+
+  // ── Comandos (sin slash, lenguaje natural) ──
+  if (lower.startsWith('tomar '))       { await handleTomar(remitente, farmacia, text); return; }
+  if (lower === 'fin')                   { await handleFin(remitente, farmacia); return; }
+  if (lower === 'cola')                  { await handleCola(remitente, farmacia); return; }
+  if (lower.startsWith('oferta '))       { await handleOferta(remitente, farmacia, text); return; }
+  if (lower === 'oferta')                { await reply(remitente, 'Uso: oferta [descripción]\nEj: oferta Ibuprofeno 400mg x20 $2500 solo hoy'); return; }
+  if (lower.startsWith('espera '))       { await handleAgregarEspera(remitente, farmacia, text); return; }
+  if (lower === 'lista_espera' || lower === 'espera') { await handleListaEspera(remitente, farmacia); return; }
+  if (lower.startsWith('avisar '))       { await handleAvisar(remitente, farmacia, text); return; }
+  if (lower === 'ayuda' || lower === 'help' || lower === 'hola') { await handleAyuda(remitente, farmacia); return; }
+
+  // Default: si no hay control activo, mostrar ayuda
+  if (!control) await handleAyuda(remitente, farmacia);
+}
+
+function esComando(lower: string): boolean {
+  return (
+    lower.startsWith('tomar ') ||
+    lower === 'fin' ||
+    lower === 'cola' ||
+    lower.startsWith('oferta') ||
+    lower.startsWith('espera') ||
+    lower === 'lista_espera' ||
+    lower.startsWith('avisar ') ||
+    lower === 'ayuda' ||
+    lower === 'sí' ||
+    lower === 'si' ||
+    lower === 'no' ||
+    lower.startsWith('editar ')
+  );
+}
+
+// ─── Handlers ────────────────────────────────────────────────────────────────
+
+async function handleTomar(remitente: string, farmacia: Farmacia, text: string) {
+  const telefono = text.replace(/^tomar\s+/i, '').replace(/[^0-9]/g, '');
+  if (!telefono) {
+    await reply(remitente, 'Uso: tomar [número del cliente]\nEj: tomar 5491123456789');
+    return;
+  }
 
   const conv = await tomarControl(farmacia.id, telefono);
   if (!conv) {
-    await enviarAdmin(remitente, `No encontré una conversación con ${telefono} en ${farmacia.nombre}.`);
+    await reply(remitente, `No encontré conversación con ${telefono}. Puede que no haya hablado con tu farmacia aún.`);
     return;
   }
 
@@ -165,11 +178,9 @@ async function handleTomar(remitente: string, farmacia: Farmacia, text: string) 
     conversacionId: conv.id,
   });
 
-  await enviarAdmin(
+  await reply(
     remitente,
-    `✅ Tomaste control de la conversación con ${telefono} (${farmacia.nombre}).\n` +
-      `Todo lo que escribas (sin /) se reenvía al cliente.\n` +
-      `Usá /fin cuando termines.`,
+    `✅ Estás hablando con ${telefono}.\nTodo lo que escribas le llega directo.\nEscribí "fin" cuando termines.`,
   );
 }
 
@@ -177,81 +188,73 @@ async function handleFin(remitente: string, farmacia: Farmacia) {
   controlesActivos.delete(remitente);
   const liberadas = await liberarConversacionesDeFarmacia(farmacia.id);
   if (liberadas.length === 0) {
-    await enviarAdmin(remitente, 'No había conversaciones bajo tu control.');
+    await reply(remitente, 'No tenías ninguna conversación activa.');
     return;
   }
-  await enviarAdmin(remitente, `✅ ${liberadas.length} conversación(es) devuelta(s) al bot.`);
+  await reply(remitente, `✅ ${liberadas.length} conversación(es) devuelta(s) al bot.`);
 }
 
 async function handleCola(remitente: string, farmacia: Farmacia) {
   const cola = await getConversacionesEnEspera(farmacia.id);
   if (cola.length === 0) {
-    await enviarAdmin(remitente, 'No hay clientes en espera.');
+    await reply(remitente, '✅ No hay clientes en espera.');
     return;
   }
-  const lineas = cola.map((c, i) => `${i + 1}. ${c.cliente.telefono} — desde ${c.updatedAt.toISOString().slice(11, 16)}`);
-  await enviarAdmin(remitente, `⏳ Clientes esperando:\n\n${lineas.join('\n')}`);
+  const lineas = cola.map(
+    (c, i) => `${i + 1}. ${c.cliente.telefono} — desde ${c.updatedAt.toISOString().slice(11, 16)} hs`,
+  );
+  await reply(remitente, `⏳ Clientes en espera:\n\n${lineas.join('\n')}`);
 }
 
 async function handleOferta(remitente: string, farmacia: Farmacia, text: string) {
-  const descripcion = text.slice('/oferta'.length).trim();
+  const descripcion = text.replace(/^oferta\s+/i, '').trim();
   if (!descripcion) {
-    await enviarAdmin(
-      remitente,
-      'Uso: /oferta [texto]\nEj: /oferta Ibuprofeno 400mg x20 comp $2500 solo hoy',
-    );
+    await reply(remitente, 'Uso: oferta [descripción]\nEj: oferta Ibuprofeno 400mg x20 $2500 solo hoy');
     return;
   }
 
   const cantidad = await getClientesCount(farmacia.id);
   if (cantidad === 0) {
-    await enviarAdmin(remitente, 'No hay clientes registrados aún en tu farmacia.');
+    await reply(remitente, 'Todavía no hay clientes registrados en tu farmacia.');
     return;
   }
 
+  await reply(remitente, '⏳ Generando mensaje con IA...');
   const mensajeGenerado = await generarMensajeOferta(farmacia, descripcion, null);
-  ofertasPendientes.set(remitente, {
-    farmaciaId: farmacia.id,
-    descripcionOriginal: descripcion,
-    mensajeActual: mensajeGenerado,
-  });
-
-  await enviarAdmin(remitente, buildPreview(mensajeGenerado, cantidad));
+  ofertasPendientes.set(remitente, { farmaciaId: farmacia.id, descripcionOriginal: descripcion, mensajeActual: mensajeGenerado });
+  await reply(remitente, buildPreview(mensajeGenerado, cantidad));
 }
 
 async function confirmarOferta(remitente: string, pendiente: OfertaPendiente) {
   ofertasPendientes.delete(remitente);
+  await reply(remitente, '📤 Enviando...');
   const telefonos = await getClientesTelefonos(pendiente.farmaciaId);
-  let enviados = 0;
+  let ok = 0;
   for (const t of telefonos) {
-    try {
-      await sendFromPharmacy(pendiente.farmaciaId, t, pendiente.mensajeActual);
-      enviados++;
-    } catch (err) {
-      logger.error({ err, to: t }, 'Error enviando oferta');
-    }
+    try { await sendFromPharmacy(pendiente.farmaciaId, t, pendiente.mensajeActual); ok++; }
+    catch (err) { logger.error({ err, to: t }, 'Error enviando oferta'); }
   }
-  await enviarAdmin(remitente, `✅ Oferta enviada a ${enviados}/${telefonos.length} cliente(s).`);
+  await reply(remitente, `✅ Oferta enviada a ${ok}/${telefonos.length} clientes.`);
 }
 
 async function cancelarOferta(remitente: string) {
   ofertasPendientes.delete(remitente);
-  await enviarAdmin(remitente, '❌ Oferta cancelada.');
+  await reply(remitente, '❌ Oferta cancelada.');
 }
 
 async function editarOferta(remitente: string, pendiente: OfertaPendiente, instrucciones: string) {
   if (!instrucciones) {
-    await enviarAdmin(remitente, "Indicá cómo modificar. Ej: 'editar más formal y sin emojis'");
+    await reply(remitente, 'Indicá cómo modificar el mensaje. Ej: editar más formal y sin emojis');
     return;
   }
   const farmacia = await prisma.farmacia.findUnique({ where: { id: pendiente.farmaciaId } });
   if (!farmacia) return;
 
+  await reply(remitente, '⏳ Regenerando...');
   const nuevo = await generarMensajeOferta(farmacia, pendiente.descripcionOriginal, instrucciones);
   ofertasPendientes.set(remitente, { ...pendiente, mensajeActual: nuevo });
-
   const cantidad = await getClientesCount(pendiente.farmaciaId);
-  await enviarAdmin(remitente, buildPreview(nuevo, cantidad));
+  await reply(remitente, buildPreview(nuevo, cantidad));
 }
 
 async function reenviarAlCliente(remitente: string, control: ControlActivo, texto: string) {
@@ -262,40 +265,120 @@ async function reenviarAlCliente(remitente: string, control: ControlActivo, text
     });
     await cambiarEstadoConversacion(control.conversacionId, 'farmaceutico');
   } catch (err) {
-    logger.error({ err }, 'Error reenviando mensaje del farmacéutico al cliente');
-    await enviarAdmin(remitente, '❌ No pude enviarle el mensaje al cliente.');
+    logger.error({ err }, 'Error reenviando al cliente');
+    await reply(remitente, '❌ No pude enviar el mensaje al cliente. ¿La sesión de WhatsApp de tu farmacia está conectada?');
   }
 }
 
+// ─── Lista de espera ─────────────────────────────────────────────────────────
+
+async function handleAgregarEspera(remitente: string, farmacia: Farmacia, text: string) {
+  // "espera [teléfono] [producto]"
+  const partes = text.replace(/^espera\s+/i, '').trim().split(/\s+/, 2);
+  if (partes.length < 2) {
+    await reply(remitente, 'Uso: espera [teléfono] [producto]\nEj: espera 5491123456789 Ibuprofeno 400mg');
+    return;
+  }
+  const [telefonoRaw, ...productoParts] = text.replace(/^espera\s+/i, '').trim().split(/\s+/);
+  const telefono = (telefonoRaw ?? '').replace(/[^0-9]/g, '');
+  const producto = productoParts.join(' ');
+
+  if (!telefono || !producto) {
+    await reply(remitente, 'Uso: espera [teléfono] [producto]\nEj: espera 5491123456789 Ibuprofeno 400mg');
+    return;
+  }
+
+  try {
+    const resultado = await agregarAListaEspera(farmacia.id, telefono, producto);
+    if (!resultado) {
+      await reply(remitente, `ℹ️ ${telefono} ya estaba en lista de espera para ${producto}.`);
+    } else {
+      await reply(remitente, `✅ ${telefono} agregado a lista de espera para: ${producto}`);
+    }
+  } catch (err: any) {
+    await reply(remitente, `❌ ${err?.message ?? 'Error al agregar a lista de espera'}`);
+  }
+}
+
+async function handleListaEspera(remitente: string, farmacia: Farmacia) {
+  const lista = await getListaEspera(farmacia.id);
+  if (lista.length === 0) {
+    await reply(remitente, '✅ No hay nadie en lista de espera.');
+    return;
+  }
+  const lineas = lista.map(
+    (e, i) => `${i + 1}. ${e.cliente.telefono} — ${e.producto} (${e.createdAt.toLocaleDateString('es-AR')})`,
+  );
+  await reply(remitente, `📋 Lista de espera:\n\n${lineas.join('\n')}\n\nUsá "avisar [producto]" para notificarlos.`);
+}
+
+async function handleAvisar(remitente: string, farmacia: Farmacia, text: string) {
+  const producto = text.replace(/^avisar\s+/i, '').trim();
+  if (!producto) {
+    await reply(remitente, 'Uso: avisar [producto]\nEj: avisar Ibuprofeno 400mg');
+    return;
+  }
+
+  const esperas = await getClientesEsperandoProducto(farmacia.id, producto);
+  if (esperas.length === 0) {
+    await reply(remitente, `No hay nadie esperando "${producto}".`);
+    return;
+  }
+
+  await reply(remitente, `📤 Notificando a ${esperas.length} cliente(s)...`);
+
+  const mensaje =
+    `¡Buenas noticias! 🎉\n` +
+    `Llegó *${producto}* a ${farmacia.nombre}.\n` +
+    `Pasá a buscarlo o pedí delivery. ¡Te esperamos!`;
+
+  let ok = 0;
+  for (const e of esperas) {
+    try {
+      await sendFromPharmacy(farmacia.id, e.cliente.telefono, mensaje);
+      ok++;
+    } catch (err) {
+      logger.error({ err, to: e.cliente.telefono }, 'Error notificando lista de espera');
+    }
+  }
+
+  await marcarNotificados(esperas.map((e) => e.id));
+  await reply(remitente, `✅ Notificados ${ok}/${esperas.length} clientes para "${producto}".`);
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function buildPreview(mensaje: string, cantidad: number): string {
   return (
-    `📣 Vista previa de la oferta:\n\n${mensaje}\n\n` +
-    `Se enviará a ${cantidad} cliente(s).\n` +
-    `✅ 'sí' para enviar\n` +
-    `✏️ 'editar [instrucciones]' para modificar\n` +
-    `❌ 'no' para cancelar`
+    `📣 Vista previa:\n\n${mensaje}\n\n` +
+    `─────────────────\n` +
+    `Se enviará a ${cantidad} cliente(s).\n\n` +
+    `✅ "sí" → enviar\n` +
+    `✏️ "editar [instrucciones]" → regenerar\n` +
+    `❌ "no" → cancelar`
   );
 }
 
 async function handleAyuda(remitente: string, farmacia: Farmacia) {
-  await enviarAdmin(
+  const control = controlesActivos.get(remitente);
+  const estadoControl = control
+    ? `\n📞 Ahora mismo estás hablando con ${control.telefonoCliente}. Escribí "fin" para terminar.\n`
+    : '';
+
+  await reply(
     remitente,
-    `🤖 Bot de ${farmacia.nombre}\n\n` +
-      'Comandos:\n' +
-      '• /tomar [número] — tomar control de un cliente\n' +
-      '• /fin — devolver el control al bot\n' +
-      '• /cola — ver clientes en espera\n' +
-      '• /oferta [texto] — enviar oferta a todos tus clientes\n' +
-      '• /ayuda — este mensaje\n\n' +
-      '👉 Cuando tomás control, cualquier texto sin / se le manda al cliente.',
+    `🤖 *${farmacia.nombre}* — comandos disponibles:\n` +
+      `${estadoControl}\n` +
+      `*Atención al cliente:*\n` +
+      `tomar [número] — tomar control de una conv.\n` +
+      `fin — devolver al bot\n` +
+      `cola — clientes en espera\n\n` +
+      `*Ofertas:*\n` +
+      `oferta [descripción] — crear y enviar oferta\n\n` +
+      `*Lista de espera (sin stock):*\n` +
+      `espera [teléfono] [producto] — agregar cliente\n` +
+      `lista_espera — ver lista\n` +
+      `avisar [producto] — notificar que llegó\n\n` +
+      `*Tip:* cuando tomás control, todo lo que escribas le llega al cliente.`,
   );
-}
-
-// Utilidad para que super-admin pueda mandar mensajes arbitrarios desde la sesión admin.
-export async function superAdminSend(telefono: string, text: string) {
-  await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
-}
-
-export function isSuperAdminWhatsApp(num: string): boolean {
-  return num.replace(/[^0-9]/g, '') === config.ADMIN_WHATSAPP_NUMBER.replace(/[^0-9]/g, '');
 }
