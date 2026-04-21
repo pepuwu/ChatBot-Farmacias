@@ -163,6 +163,7 @@ export function buildTelegramBot() {
     const label = isAdmin ? 'bot de administradores' : `farmacia ${arg}`;
 
     await sessionManager.stopSession(sid).catch(() => {});
+    resetQRPushCount(sid);
     const qrPromise = sessionManager.waitForQR(sid, 60000);
     const restart = isAdmin ? startAdminSession() : startPharmacySession(arg);
     restart.catch((err) => logger.error({ err, sid }, 'Error reiniciando sesión'));
@@ -192,22 +193,29 @@ export function buildTelegramBot() {
  * Empuja automáticamente al super admin cualquier QR emitido por cualquier
  * sesión de WhatsApp (admin o farmacia), como imagen PNG.
  */
-export function registerQRPushToSuperAdmin(bot: Telegraf) {
-  const lastSentAt = new Map<string, number>();
-  const COOLDOWN_MS = 60_000;
+const qrPushCounts = new Map<string, number>();
+const MAX_AUTO_QR_PUSHES = 2;
 
+export function resetQRPushCount(sessionId: string) {
+  qrPushCounts.delete(sessionId);
+}
+
+export function registerQRPushToSuperAdmin(bot: Telegraf) {
   return sessionManager.onQR(async (sessionId, qr) => {
-    const now = Date.now();
-    const last = lastSentAt.get(sessionId) ?? 0;
-    if (now - last < COOLDOWN_MS) return;
-    lastSentAt.set(sessionId, now);
+    const count = qrPushCounts.get(sessionId) ?? 0;
+    if (count >= MAX_AUTO_QR_PUSHES) return;
+    qrPushCounts.set(sessionId, count + 1);
 
     try {
       const png = await QRCode.toBuffer(qr);
+      const caption =
+        count + 1 === MAX_AUTO_QR_PUSHES
+          ? `📱 Escaneá para emparejar la sesión: ${sessionId}\n\n⚠️ Último QR automático. Si expira, pedí uno nuevo con /qr ${sessionId === 'admin' ? 'admin' : '<farmaciaId>'}.`
+          : `📱 Escaneá para emparejar la sesión: ${sessionId}`;
       await bot.telegram.sendPhoto(
         config.TELEGRAM_SUPER_ADMIN_ID,
         { source: png },
-        { caption: `📱 Escaneá para emparejar la sesión: ${sessionId}` },
+        { caption },
       );
     } catch (err) {
       logger.error({ err, sessionId }, 'Error mandando QR al super admin por Telegram');
