@@ -25,10 +25,27 @@ async function auditSessionsDir() {
   await fs.unlink(probe);
 
   const entries = await fs.readdir(resolved).catch(() => []);
+  const perSession = await Promise.all(
+    entries
+      .filter((e) => !e.startsWith('.'))
+      .map(async (name) => {
+        const dir = path.join(resolved, name);
+        const files = await fs.readdir(dir).catch(() => [] as string[]);
+        return { session: name, hasCreds: files.includes('creds.json'), fileCount: files.length };
+      }),
+  );
+
   logger.info(
-    { configured: config.SESSIONS_DIR, resolved, existingSessions: entries },
+    { configured: config.SESSIONS_DIR, resolved, sessions: perSession },
     '📂 SESSIONS_DIR listo',
   );
+
+  if (perSession.length === 0) {
+    logger.warn(
+      { resolved },
+      '⚠️  El directorio está vacío — si esperabas sesiones previas, el volumen no está persistiendo',
+    );
+  }
 }
 
 async function main() {

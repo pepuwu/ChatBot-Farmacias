@@ -78,8 +78,22 @@ class SessionManager {
     const authDir = path.resolve(config.SESSIONS_DIR, sessionId);
     await fs.mkdir(authDir, { recursive: true });
 
+    const existingFiles = await fs.readdir(authDir).catch(() => [] as string[]);
+    const hasCreds = existingFiles.includes('creds.json');
+    logger.info(
+      { sessionId, authDir, hasCreds, files: existingFiles.length },
+      hasCreds
+        ? '🔑 Credenciales encontradas — intentando reanudar sin QR'
+        : '📱 Sin credenciales previas — se pedirá QR',
+    );
+
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const { version } = await fetchLatestBaileysVersion();
+
+    logger.info(
+      { sessionId, registered: state.creds.registered, me: state.creds.me?.id },
+      'Estado de auth cargado',
+    );
 
     const sock = makeWASocket({
       version,
@@ -93,7 +107,15 @@ class SessionManager {
     const entry: SessionEntry = { sock, ready: false };
     this.sessions.set(sessionId, entry);
 
-    sock.ev.on('creds.update', saveCreds);
+    let savedOnce = false;
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+      if (!savedOnce) {
+        savedOnce = true;
+        const files = await fs.readdir(authDir).catch(() => [] as string[]);
+        logger.info({ sessionId, authDir, files: files.length }, '💾 Credenciales persistidas');
+      }
+    });
 
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
