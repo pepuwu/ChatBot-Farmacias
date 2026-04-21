@@ -30,4 +30,4 @@ RUN mkdir -p /app/sessions
 EXPOSE 8080
 ENV NODE_ENV=production
 
-CMD ["node", "dist/index.js"]
+CMD ["sh", "-c", "npx prisma db push && node dist/index.js"]
