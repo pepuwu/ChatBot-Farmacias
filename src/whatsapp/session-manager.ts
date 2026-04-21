@@ -32,10 +32,31 @@ interface SessionEntry {
 class SessionManager {
   private sessions = new Map<string, SessionEntry>();
   private handlers = new Set<MessageHandler>();
+  private qrWaiters = new Map<string, Set<(qr: string) => void>>();
 
   onMessage(handler: MessageHandler) {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
+  }
+
+  waitForQR(sessionId: string, timeoutMs = 60000): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let set = this.qrWaiters.get(sessionId);
+      if (!set) {
+        set = new Set();
+        this.qrWaiters.set(sessionId, set);
+      }
+      const handler = (qr: string) => {
+        clearTimeout(timer);
+        set!.delete(handler);
+        resolve(qr);
+      };
+      const timer = setTimeout(() => {
+        set!.delete(handler);
+        reject(new Error('Timeout esperando QR'));
+      }, timeoutMs);
+      set.add(handler);
+    });
   }
 
   /**
@@ -74,6 +95,8 @@ class SessionManager {
       if (qr) {
         logger.warn({ sessionId }, 'Escanear QR con WhatsApp para emparejar');
         qrcode.generate(qr, { small: true });
+        const waiters = this.qrWaiters.get(sessionId);
+        if (waiters) for (const h of waiters) h(qr);
       }
 
       if (connection === 'open') {

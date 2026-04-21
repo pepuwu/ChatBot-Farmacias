@@ -1,4 +1,5 @@
 import { Telegraf, type Context } from 'telegraf';
+import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { prisma } from '../db.js';
@@ -157,10 +158,22 @@ export function buildTelegramBot() {
     if (!id) return ctx.reply('Uso: /qr <farmaciaId>');
     const sid = pharmacySessionId(id);
     await sessionManager.stopSession(sid).catch(() => {});
-    await startPharmacySession(id).catch((err) =>
+    const qrPromise = sessionManager.waitForQR(sid, 60000);
+    startPharmacySession(id).catch((err) =>
       logger.error({ err }, 'Error reiniciando sesión'),
     );
-    return ctx.reply('Sesión reiniciada. Mirá los logs del servidor para el QR.');
+    await ctx.reply('⏳ Generando QR...');
+    try {
+      const qr = await qrPromise;
+      const png = await QRCode.toBuffer(qr);
+      await ctx.replyWithPhoto(
+        { source: png },
+        { caption: `Escaneá con WhatsApp para emparejar la farmacia ${id}.` },
+      );
+    } catch (err) {
+      logger.error({ err, id }, 'Error generando QR');
+      await ctx.reply('❌ No se generó QR (timeout). Puede que la sesión ya esté emparejada — probá de nuevo.');
+    }
   });
 
   bot.catch((err, ctx) => {
