@@ -65,20 +65,22 @@ export function registerAdminHandler() {
 // ─── Envío ───────────────────────────────────────────────────────────────────
 
 async function reply(telefono: string, text: string) {
+  // WhatsApp moderno entrega JIDs `@lid` — si tenemos uno cacheado para este
+  // número, usarlo directamente (el JID por número falla con 463 async en
+  // cuentas que ya migraron a @lid).
+  const jid = pnToJid.get(telefono);
+  if (jid) {
+    try {
+      await sessionManager.sendToJid(ADMIN_SESSION_ID, jid, text);
+      return;
+    } catch (errLid) {
+      logger.warn({ errLid, telefono, jid }, 'Envío por @lid falló, probando JID por número');
+    }
+  }
   try {
     await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
   } catch (errPhone) {
-    // Fallback: si el JID por número falla, probar el @lid cacheado del sender.
-    const jid = pnToJid.get(telefono);
-    if (!jid) {
-      logger.error({ err: errPhone, telefono }, 'Error enviando desde sesión admin');
-      return;
-    }
-    try {
-      await sessionManager.sendToJid(ADMIN_SESSION_ID, jid, text);
-    } catch (errLid) {
-      logger.error({ errPhone, errLid, telefono, jid }, 'Error enviando desde sesión admin (ambos intentos)');
-    }
+    logger.error({ err: errPhone, telefono }, 'Error enviando desde sesión admin');
   }
 }
 
