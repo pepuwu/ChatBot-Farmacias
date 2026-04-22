@@ -28,6 +28,8 @@ interface SessionEntry {
   sock: WASocket;
   ready: boolean;
   lastQR: string | null;
+  wasEverOpen: boolean;
+  stopped: boolean;
 }
 
 class SessionManager {
@@ -73,8 +75,10 @@ class SessionManager {
    */
   async startSession(sessionId: string): Promise<WASocket> {
     if (this.sessions.has(sessionId)) {
+      logger.warn({ sessionId }, 'startSession llamado con sesión ya existente — reusando');
       return this.sessions.get(sessionId)!.sock;
     }
+    logger.info({ sessionId }, '▶️  startSession');
 
     const authDir = path.resolve(config.SESSIONS_DIR, sessionId);
     await fs.mkdir(authDir, { recursive: true });
@@ -105,7 +109,7 @@ class SessionManager {
       markOnlineOnConnect: false,
     });
 
-    const entry: SessionEntry = { sock, ready: false, lastQR: null };
+    const entry: SessionEntry = { sock, ready: false, lastQR: null, wasEverOpen: false, stopped: false };
     this.sessions.set(sessionId, entry);
 
     let savedOnce = false;
@@ -122,6 +126,10 @@ class SessionManager {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        if (entry.ready || entry.stopped) {
+          logger.debug({ sessionId, ready: entry.ready, stopped: entry.stopped }, 'Ignorando QR (sesión ya conectada o detenida)');
+          return;
+        }
         entry.lastQR = qr;
         logger.warn({ sessionId }, 'Escanear QR con WhatsApp para emparejar');
         qrcode.generate(qr, { small: true });
@@ -135,21 +143,31 @@ class SessionManager {
       if (connection === 'open') {
         entry.ready = true;
         entry.lastQR = null;
-        logger.info({ sessionId, jid: sock.user?.id }, 'WhatsApp conectado');
+        entry.wasEverOpen = true;
+        logger.info({ sessionId, jid: sock.user?.id }, '✅ WhatsApp conectado — listo para recibir mensajes');
       }
 
       if (connection === 'close') {
         entry.ready = false;
         const reason = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
         const loggedOut = reason === DisconnectReason.loggedOut;
-        logger.warn({ sessionId, reason, loggedOut }, 'WhatsApp desconectado');
+        const wasEverOpen = entry.wasEverOpen;
+        logger.warn({ sessionId, reason, loggedOut, wasEverOpen }, 'WhatsApp desconectado');
         this.sessions.delete(sessionId);
+
+        if (loggedOut && wasEverOpen) {
+          logger.error(
+            { sessionId, reason },
+            '🛑 401 después de haber estado conectada — posible conflicto (otra instancia/dispositivo tomó la sesión). NO borro credenciales ni reintento automáticamente. Usá /qr para re-emparejar manualmente.',
+          );
+          return;
+        }
 
         const relaunch = async () => {
           if (loggedOut) {
             logger.error(
               { sessionId, authDir },
-              '🗑️  Sesión deslogueada (401) — borrando credenciales y generando QR nuevo',
+              '🗑️  Sesión deslogueada (401) en primer pairing — borrando credenciales y generando QR nuevo',
             );
             await fs.rm(authDir, { recursive: true, force: true }).catch((err) =>
               logger.error({ err, authDir }, 'Error borrando carpeta de sesión'),
@@ -167,10 +185,18 @@ class SessionManager {
     });
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      logger.debug({ sessionId, type, count: messages.length }, 'messages.upsert');
       if (type !== 'notify') return;
       for (const m of messages) {
         const normalized = this.normalize(m);
-        if (!normalized) continue;
+        if (!normalized) {
+          logger.debug({ sessionId, from: m.key.remoteJid }, 'Mensaje ignorado (grupo/status/sin texto)');
+          continue;
+        }
+        logger.info(
+          { sessionId, from: normalized.from, isFromMe: normalized.isFromMe, text: normalized.text.slice(0, 80) },
+          '📩 Mensaje recibido',
+        );
         for (const handler of this.handlers) {
           try {
             await handler(sessionId, normalized);
@@ -252,6 +278,7 @@ class SessionManager {
   async stopSession(sessionId: string) {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    entry.stopped = true;
     await entry.sock.logout().catch(() => {});
     this.sessions.delete(sessionId);
   }
