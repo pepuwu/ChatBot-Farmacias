@@ -248,8 +248,25 @@ class SessionManager {
     if (!entry || !entry.ready) {
       throw new Error(`Sesión ${sessionId} no lista`);
     }
-    const jid = this.toJid(phoneNumber);
+    const jid = await this.resolveJid(entry.sock, phoneNumber);
     await entry.sock.sendMessage(jid, { text });
+  }
+
+  /**
+   * Resuelve el JID canónico para un número vía `onWhatsApp`. WhatsApp moderno
+   * puede requerir `@lid` específico por cuenta — confiar en este lookup evita
+   * errores 463 por JID inválido.
+   */
+  private async resolveJid(sock: WASocket, phoneNumber: string): Promise<string> {
+    const num = phoneNumber.replace(/[^0-9]/g, '');
+    try {
+      const result = await sock.onWhatsApp(num);
+      const hit = result?.[0];
+      if (hit?.exists && hit.jid) return hit.jid;
+    } catch (err) {
+      logger.warn({ err, num }, 'onWhatsApp falló, usando JID por número');
+    }
+    return `${num}@s.whatsapp.net`;
   }
 
   /** Envía texto a un JID completo (soporta `@lid` y `@s.whatsapp.net`). */
