@@ -262,13 +262,12 @@ class SessionManager {
   }
 
   /**
-   * Convierte un número (con o sin +, con o sin prefijo 9 argentino) a JID
-   * de WhatsApp. WhatsApp usa el número sin el 9 para celulares argentinos.
+   * Convierte un número a JID de WhatsApp.
+   * Nota: WhatsApp moderno mantiene el 9 de los celulares argentinos en el
+   * JID — stripearlo produce JIDs inválidos y errores de ack (463).
    */
   private toJid(phoneNumber: string): string {
-    let num = phoneNumber.replace(/[^0-9]/g, '');
-    // Argentina: el 9 de celular no se incluye en el JID
-    if (num.startsWith('549')) num = '54' + num.slice(3);
+    const num = phoneNumber.replace(/[^0-9]/g, '');
     return `${num}@s.whatsapp.net`;
   }
 

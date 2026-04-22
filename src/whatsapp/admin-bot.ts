@@ -66,14 +66,19 @@ export function registerAdminHandler() {
 
 async function reply(telefono: string, text: string) {
   try {
+    await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
+  } catch (errPhone) {
+    // Fallback: si el JID por número falla, probar el @lid cacheado del sender.
     const jid = pnToJid.get(telefono);
-    if (jid) {
-      await sessionManager.sendToJid(ADMIN_SESSION_ID, jid, text);
-    } else {
-      await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
+    if (!jid) {
+      logger.error({ err: errPhone, telefono }, 'Error enviando desde sesión admin');
+      return;
     }
-  } catch (err) {
-    logger.error({ err, telefono }, 'Error enviando desde sesión admin');
+    try {
+      await sessionManager.sendToJid(ADMIN_SESSION_ID, jid, text);
+    } catch (errLid) {
+      logger.error({ errPhone, errLid, telefono, jid }, 'Error enviando desde sesión admin (ambos intentos)');
+    }
   }
 }
 
