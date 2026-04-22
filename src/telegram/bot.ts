@@ -1,5 +1,4 @@
 import { Telegraf, type Context } from 'telegraf';
-import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { prisma } from '../db.js';
@@ -160,26 +159,16 @@ export function buildTelegramBot() {
 
     const isAdmin = arg.toLowerCase() === 'admin';
     const sid = isAdmin ? ADMIN_SESSION_ID : pharmacySessionId(arg);
-    const label = isAdmin ? 'bot de administradores' : `farmacia ${arg}`;
 
     await sessionManager.stopSession(sid).catch(() => {});
     resetQRPushCount(sid);
-    const qrPromise = sessionManager.waitForQR(sid, 60000);
     const restart = isAdmin ? startAdminSession() : startPharmacySession(arg);
     restart.catch((err) => logger.error({ err, sid }, 'Error reiniciando sesión'));
 
-    await ctx.reply('⏳ Generando QR...');
-    try {
-      const qr = await qrPromise;
-      const png = await QRCode.toBuffer(qr);
-      await ctx.replyWithPhoto(
-        { source: png },
-        { caption: `Escaneá con WhatsApp para emparejar el ${label}.` },
-      );
-    } catch (err) {
-      logger.error({ err, sid }, 'Error generando QR');
-      await ctx.reply('❌ No se generó QR (timeout). Puede que la sesión ya esté emparejada — probá de nuevo.');
-    }
+    return ctx.reply(
+      `🔗 Escaneá el QR desde acá (se actualiza automáticamente):\n${qrLink(sid)}`,
+      { link_preview_options: { is_disabled: true } },
+    );
   });
 
   bot.catch((err, ctx) => {
@@ -193,32 +182,30 @@ export function buildTelegramBot() {
  * Empuja automáticamente al super admin cualquier QR emitido por cualquier
  * sesión de WhatsApp (admin o farmacia), como imagen PNG.
  */
-const qrPushCounts = new Map<string, number>();
-const MAX_AUTO_QR_PUSHES = 2;
+const qrLinkSent = new Set<string>();
 
 export function resetQRPushCount(sessionId: string) {
-  qrPushCounts.delete(sessionId);
+  qrLinkSent.delete(sessionId);
+}
+
+function qrLink(sessionId: string): string {
+  const base = config.PUBLIC_URL?.replace(/\/$/, '') ?? '';
+  return `${base}/qr/${encodeURIComponent(sessionId)}`;
 }
 
 export function registerQRPushToSuperAdmin(bot: Telegraf) {
-  return sessionManager.onQR(async (sessionId, qr) => {
-    const count = qrPushCounts.get(sessionId) ?? 0;
-    if (count >= MAX_AUTO_QR_PUSHES) return;
-    qrPushCounts.set(sessionId, count + 1);
+  return sessionManager.onQR(async (sessionId) => {
+    if (qrLinkSent.has(sessionId)) return;
+    qrLinkSent.add(sessionId);
 
     try {
-      const png = await QRCode.toBuffer(qr);
-      const caption =
-        count + 1 === MAX_AUTO_QR_PUSHES
-          ? `📱 Escaneá para emparejar la sesión: ${sessionId}\n\n⚠️ Último QR automático. Si expira, pedí uno nuevo con /qr ${sessionId === 'admin' ? 'admin' : '<farmaciaId>'}.`
-          : `📱 Escaneá para emparejar la sesión: ${sessionId}`;
-      await bot.telegram.sendPhoto(
+      await bot.telegram.sendMessage(
         config.TELEGRAM_SUPER_ADMIN_ID,
-        { source: png },
-        { caption },
+        `🔗 Escaneá el QR desde acá (se actualiza automáticamente):\n${qrLink(sessionId)}`,
+        { link_preview_options: { is_disabled: true } },
       );
     } catch (err) {
-      logger.error({ err, sessionId }, 'Error mandando QR al super admin por Telegram');
+      logger.error({ err, sessionId }, 'Error mandando link de QR al super admin');
     }
   });
 }

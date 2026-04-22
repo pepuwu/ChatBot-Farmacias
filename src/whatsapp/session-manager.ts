@@ -27,6 +27,7 @@ export type MessageHandler = (sessionId: string, msg: IncomingMessage) => Promis
 interface SessionEntry {
   sock: WASocket;
   ready: boolean;
+  lastQR: string | null;
 }
 
 class SessionManager {
@@ -104,7 +105,7 @@ class SessionManager {
       markOnlineOnConnect: false,
     });
 
-    const entry: SessionEntry = { sock, ready: false };
+    const entry: SessionEntry = { sock, ready: false, lastQR: null };
     this.sessions.set(sessionId, entry);
 
     let savedOnce = false;
@@ -121,6 +122,7 @@ class SessionManager {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        entry.lastQR = qr;
         logger.warn({ sessionId }, 'Escanear QR con WhatsApp para emparejar');
         qrcode.generate(qr, { small: true });
         const waiters = this.qrWaiters.get(sessionId);
@@ -132,6 +134,7 @@ class SessionManager {
 
       if (connection === 'open') {
         entry.ready = true;
+        entry.lastQR = null;
         logger.info({ sessionId, jid: sock.user?.id }, 'WhatsApp conectado');
       }
 
@@ -236,6 +239,10 @@ class SessionManager {
 
   isReady(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.ready ?? false;
+  }
+
+  getLastQR(sessionId: string): string | null {
+    return this.sessions.get(sessionId)?.lastQR ?? null;
   }
 
   listSessions(): string[] {

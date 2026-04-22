@@ -9,6 +9,7 @@ const schema = z.object({
   TELEGRAM_SUPER_ADMIN_ID: z.coerce.number().int(),
   TELEGRAM_WEBHOOK_URL: z.string().url().optional(),
   TELEGRAM_WEBHOOK_SECRET: z.string().min(1).optional(),
+  PUBLIC_URL: z.string().url().optional(),
   ADMIN_WHATSAPP_NUMBER: z.string().min(1),
   PORT: z.coerce.number().int().default(8080),
   HOST: z.string().default('0.0.0.0'),
