@@ -228,7 +228,11 @@ class SessionManager {
 
     if (!text) return null;
 
-    const phoneNumber = remoteJid.split('@')[0]!.split(':')[0]!;
+    // En WhatsApp moderno el remoteJid puede ser `<lid>@lid` (identificador anónimo).
+    // Para lookups en DB necesitamos el número real: Baileys lo expone en `senderPn`.
+    const senderPn = (m.key as { senderPn?: string }).senderPn;
+    const pnSource = senderPn ?? remoteJid;
+    const phoneNumber = pnSource.split('@')[0]!.split(':')[0]!;
 
     return {
       from: remoteJid,
@@ -245,6 +249,15 @@ class SessionManager {
       throw new Error(`Sesión ${sessionId} no lista`);
     }
     const jid = this.toJid(phoneNumber);
+    await entry.sock.sendMessage(jid, { text });
+  }
+
+  /** Envía texto a un JID completo (soporta `@lid` y `@s.whatsapp.net`). */
+  async sendToJid(sessionId: string, jid: string, text: string) {
+    const entry = this.sessions.get(sessionId);
+    if (!entry || !entry.ready) {
+      throw new Error(`Sesión ${sessionId} no lista`);
+    }
     await entry.sock.sendMessage(jid, { text });
   }
 

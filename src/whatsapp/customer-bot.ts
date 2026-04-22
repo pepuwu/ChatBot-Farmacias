@@ -41,7 +41,7 @@ async function handlePharmacyMessage(sessionId: string, msg: IncomingMessage) {
 
   if (result.respuesta) {
     try {
-      await sessionManager.sendText(sessionId, msg.phoneNumber, result.respuesta);
+      await sessionManager.sendToJid(sessionId, msg.from, result.respuesta);
     } catch (err) {
       logger.error({ err, farmaciaId, to: msg.phoneNumber }, 'Error enviando respuesta WhatsApp al cliente');
     }

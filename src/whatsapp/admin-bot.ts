@@ -45,6 +45,9 @@ interface ControlActivo {
 // Estado en memoria por farmacéutico
 const ofertasPendientes = new Map<string, OfertaPendiente>();
 const controlesActivos = new Map<string, ControlActivo>();
+// WhatsApp moderno entrega JIDs `@lid` anónimos; guardamos el último JID visto
+// por cada número para poder responder al JID correcto.
+const pnToJid = new Map<string, string>();
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
@@ -63,7 +66,12 @@ export function registerAdminHandler() {
 
 async function reply(telefono: string, text: string) {
   try {
-    await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
+    const jid = pnToJid.get(telefono);
+    if (jid) {
+      await sessionManager.sendToJid(ADMIN_SESSION_ID, jid, text);
+    } else {
+      await sessionManager.sendText(ADMIN_SESSION_ID, telefono, text);
+    }
   } catch (err) {
     logger.error({ err, telefono }, 'Error enviando desde sesión admin');
   }
@@ -93,6 +101,7 @@ export async function notificarPedido(farmacia: Farmacia, telefonoCliente: strin
 
 async function handleAdminMessage(msg: IncomingMessage) {
   const remitente = msg.phoneNumber;
+  pnToJid.set(remitente, msg.from);
 
   const admin = await prisma.admin.findUnique({
     where: { whatsappNumber: remitente },
