@@ -249,6 +249,7 @@ class SessionManager {
       throw new Error(`Sesión ${sessionId} no lista`);
     }
     const jid = await this.resolveJid(entry.sock, phoneNumber);
+    await this.ensureSignalSession(entry.sock, jid);
     await entry.sock.sendMessage(jid, { text });
   }
 
@@ -275,7 +276,21 @@ class SessionManager {
     if (!entry || !entry.ready) {
       throw new Error(`Sesión ${sessionId} no lista`);
     }
+    await this.ensureSignalSession(entry.sock, jid);
     await entry.sock.sendMessage(jid, { text });
+  }
+
+  /**
+   * Fuerza el fetch de pre-keys del destinatario para garantizar que haya
+   * una sesión Signal válida. Sin esto, cuentas que nunca contactaron al
+   * destinatario pueden devolver error 463 en el ack.
+   */
+  private async ensureSignalSession(sock: WASocket, jid: string) {
+    try {
+      await sock.assertSessions([jid], true);
+    } catch (err) {
+      logger.warn({ err, jid }, 'assertSessions falló — se intenta enviar igual');
+    }
   }
 
   /**
