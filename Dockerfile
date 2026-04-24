@@ -25,10 +25,8 @@ COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 
 COPY --from=build /app/dist ./dist
 COPY scripts/start.sh ./start.sh
+COPY dbsetup.js ./
 
 RUN chmod +x /app/start.sh
 
 EXPOSE 8080
-ENV NODE_ENV=production
-
-CMD ["/app/start.sh"]

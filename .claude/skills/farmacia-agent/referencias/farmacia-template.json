@@ -1,0 +1,31 @@
+{
+  "nombre": "Farmacia San Martín",
+  "whatsapp": "+5491112345678",
+  "direccion": "Av. San Martín 1234, Palermo, CABA",
+  "horarios": {
+    "semana": "Lunes a Viernes 8:00 a 20:00",
+    "sabado": "9:00 a 14:00",
+    "domingo": "Cerrado"
+  },
+  "delivery": true,
+  "zona_delivery": "Palermo, Villa Crespo, Almagro",
+  "obras_sociales": [
+    "OSDE",
+    "Swiss Medical",
+    "IOMA",
+    "PAMI",
+    "Galeno",
+    "Medicus"
+  ],
+  "servicios": [
+    "delivery",
+    "inyectables",
+    "control de presión",
+    "turno nocturno"
+  ],
+  "telegram_admin_id": "123456789",
+  "mensaje_bienvenida": "¡Hola! Bienvenido a Farmacia San Martín 👋 ¿En qué te puedo ayudar?",
+  "mensaje_derivacion": "Esa consulta te la tiene que responder nuestro farmacéutico. ¿Te lo comunico?",
+  "tiempo_sesion_minutos": 10,
+  "db_path": "./data/farmacia-san-martin.db"
+}
