@@ -11,9 +11,13 @@ function buildSystemPrompt(farmacia: Farmacia, esPrimerMensaje: boolean): string
   if (farmacia.promptSistema?.trim()) return farmacia.promptSistema;
 
   const h = (farmacia.horarios ?? {}) as Horarios;
-  const obrasSociales = farmacia.obrasSociales.join(', ') || 'Consultar';
+  const obrasSocialesList = farmacia.obrasSociales ?? [];
+  const obrasSociales = obrasSocialesList.length > 0
+    ? obrasSocialesList.join(', ')
+    : 'NO HAY INFORMACIÓN CARGADA — decile al cliente que no tenés esa info y que consulte directamente con el farmacéutico. NO inventes obras sociales.';
   const servicios = farmacia.servicios.join(', ') || '—';
   const bienvenida = farmacia.mensajeBienvenida || `¡Hola! Bienvenido a ${farmacia.nombre} 👋`;
+  const telefono = `+${farmacia.whatsappNumber}`;
 
   const bloqueMenu = esPrimerMensaje
     ? `
@@ -43,12 +47,18 @@ OBRAS SOCIALES ACEPTADAS: ${obrasSociales}
 
 SERVICIOS: ${servicios}
 
+TELÉFONO DE CONTACTO / WHATSAPP DE LA FARMACIA: ${telefono}
+
 REGLAS CRÍTICAS:
 1. Respondé siempre en el idioma que usa el cliente.
 2. NUNCA diagnosticás enfermedades ni recomendás tratamientos complejos. Si te preguntan algo médico complejo, respondé: "${farmacia.mensajeDerivacion}"
 3. Sé amable, breve y directo. Usá lenguaje coloquial argentino.
-4. Si el cliente pregunta por un medicamento y podría no estar disponible, preguntale si quiere que le avisemos cuando llegue.
+4. Priorizá concretar la venta y tomar el pedido aunque el stock no esté confirmado todavía. No bloquees la intención de compra por falta de confirmación de stock y no ofrezcas lista de espera por defecto. Solo mencioná falta de stock o lista de espera si la falta de stock ya fue confirmada explícitamente. Si surge un problema real de stock, indicá que el farmacéutico va a continuar la atención.
 5. No hagas listas largas — respondé lo que el cliente necesita.
+6. Cuando hables de obras sociales, usá únicamente esta información cargada: ${obrasSociales}. Si no hay información cargada, decí explícitamente que no tenés esa info y que consulte con el farmacéutico. Nunca inventes obras sociales.
+7. Si tenés que dar el número de contacto de la farmacia, usá siempre exactamente este formato: ${telefono}. Nunca uses placeholders como "[inserta número]".
+8. Para consultas OTC simples o síntomas menores como dolor de cabeza, fiebre leve, resfriado o dolor muscular, podés sugerir opciones comunes de venta libre como paracetamol o ibuprofeno, aclarando explícitamente que son de venta libre y manteniendo la respuesta breve y prudente. Solo derivá al farmacéutico cuando se trate de medicamentos con receta, patologías crónicas, embarazo, interacciones, alergias relevantes o situaciones médicas complejas.
+9. Si el cliente muestra intención de compra o confirma que quiere llevar un producto, cerrá la conversación de venta con una pregunta concreta como "¿Lo separamos para que pases?" o "¿Te lo enviamos por delivery?". No cierres con el genérico "¿necesitás algo más?" en esos casos.
 ${bloqueMenu}`;
 }
 
