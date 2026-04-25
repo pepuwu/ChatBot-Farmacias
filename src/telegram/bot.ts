@@ -13,6 +13,116 @@ import { ADMIN_SESSION_ID, startAdminSession } from '../whatsapp/admin-bot.js';
  * - Ver estado de las sesiones de WhatsApp
  */
 
+// ---------------------------------------------------------------------------
+// Onboarding conversacional — /nueva_farmacia
+// ---------------------------------------------------------------------------
+
+type OnboardingStep =
+  | 'nombre'
+  | 'whatsapp'
+  | 'direccion'
+  | 'telefonoFijo'
+  | 'horarioSemana'
+  | 'horarioSabado'
+  | 'horarioDomingo'
+  | 'delivery'
+  | 'zonaDelivery'
+  | 'obrasSociales'
+  | 'servicios'
+  | 'productosExcluidos'
+  | 'farmaceutico'
+  | 'confirmacion';
+
+interface OnboardingData {
+  nombre: string;
+  whatsapp: string;
+  direccion: string;
+  telefonoFijo: string | null;
+  horarioSemana: string;
+  horarioSabado: string;
+  horarioDomingo: string;
+  delivery: boolean;
+  zonaDelivery: string;
+  obrasSociales: string[];
+  servicios: string[];
+  productosExcluidos: string[];
+  farmaceutico: string;
+}
+
+interface OnboardingState {
+  step: OnboardingStep;
+  data: Partial<OnboardingData>;
+}
+
+const onboardingMap = new Map<number, OnboardingState>();
+
+const QUESTIONS: Record<Exclude<OnboardingStep, 'confirmacion'>, string> = {
+  nombre:             '🏪 ¿Cuál es el nombre de la farmacia?',
+  whatsapp:           '📱 ¿Cuál es el número de WhatsApp? (solo números, sin +, sin espacios)\nEj: 5491123456789',
+  direccion:          '📍 ¿Cuál es la dirección?',
+  telefonoFijo:       '☎️ ¿Tienen teléfono fijo? (o escribí "-" si no tienen)',
+  horarioSemana:      '🕐 Horario de lunes a viernes (ej: "8:00 a 20:00")',
+  horarioSabado:      '🕐 Horario del sábado (ej: "9:00 a 13:00", o "-" si no abre)',
+  horarioDomingo:     '🕐 Horario del domingo (ej: "10:00 a 13:00", o "-" si no abre)',
+  delivery:           '🛵 ¿Hacen delivery? Respondé "si" o "no"',
+  zonaDelivery:       '📦 ¿Cuál es la zona de cobertura? (ej: "radio 5km" o listá los barrios)',
+  obrasSociales:      '🏥 Obras sociales aceptadas (ej: "OSDE, PAMI, Swiss Medical" o "-" si ninguna)',
+  servicios:          '⚕️ Servicios especiales (ej: "Inyectables, Análisis" o "-" si ninguno)',
+  productosExcluidos: '🚫 Productos que NO manejan (ej: "Homeopatía, Veterinaria" o "-" si manejan todo)',
+  farmaceutico:       '👤 ¿Cómo se llama el farmacéutico/a principal?',
+};
+
+/** Devuelve la lista de pasos en orden, omitiendo zonaDelivery si delivery=false */
+function stepsFor(delivery: boolean): OnboardingStep[] {
+  return [
+    'nombre', 'whatsapp', 'direccion', 'telefonoFijo',
+    'horarioSemana', 'horarioSabado', 'horarioDomingo',
+    'delivery',
+    ...(delivery ? (['zonaDelivery'] as OnboardingStep[]) : []),
+    'obrasSociales', 'servicios', 'productosExcluidos',
+    'farmaceutico', 'confirmacion',
+  ];
+}
+
+function nextStep(current: OnboardingStep, delivery: boolean): OnboardingStep | null {
+  const steps = stepsFor(delivery);
+  const idx = steps.indexOf(current);
+  return idx >= 0 && idx < steps.length - 1 ? steps[idx + 1] : null;
+}
+
+function splitList(text: string): string[] {
+  return text.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function buildSummary(data: Partial<OnboardingData>): string {
+  const obras = data.obrasSociales?.length ? data.obrasSociales.join(', ') : 'Ninguna';
+  const servicios = data.servicios?.length ? data.servicios.join(', ') : 'Ninguno';
+  const excluidos = data.productosExcluidos?.length ? data.productosExcluidos.join(', ') : 'Ninguno';
+  const sabado = data.horarioSabado === '-' ? 'No abre' : data.horarioSabado;
+  const domingo = data.horarioDomingo === '-' ? 'No abre' : data.horarioDomingo;
+
+  return (
+    `📋 *Resumen de la farmacia*\n\n` +
+    `🏪 *Nombre:* ${data.nombre}\n` +
+    `📱 *WhatsApp:* +${data.whatsapp}\n` +
+    `📍 *Dirección:* ${data.direccion}\n` +
+    `☎️ *Tel\\. fijo:* ${data.telefonoFijo ?? '—'}\n` +
+    `🕐 *L\\-V:* ${data.horarioSemana}\n` +
+    `🕐 *Sábado:* ${sabado}\n` +
+    `🕐 *Domingo:* ${domingo}\n` +
+    `🛵 *Delivery:* ${data.delivery ? `Sí — ${data.zonaDelivery}` : 'No'}\n` +
+    `🏥 *Obras sociales:* ${obras}\n` +
+    `⚕️ *Servicios:* ${servicios}\n` +
+    `🚫 *Excluidos:* ${excluidos}\n` +
+    `👤 *Farmacéutico/a:* ${data.farmaceutico}\n\n` +
+    `¿Guardamos? Respondé *si* para confirmar o *no* para cancelar\\.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bot principal
+// ---------------------------------------------------------------------------
+
 export function buildTelegramBot() {
   const bot = new Telegraf(config.TELEGRAM_BOT_TOKEN);
 
@@ -29,7 +139,8 @@ export function buildTelegramBot() {
       `🤖 Panel de control — Chatbot Farmacias\n\n` +
         `Comandos:\n` +
         `/farmacias — listar farmacias\n` +
-        `/nueva_farmacia <nombre>|<whatsappNumber>|<direccion> — alta de farmacia\n` +
+        `/nueva_farmacia — alta de farmacia (flujo paso a paso)\n` +
+        `/cancelar — cancelar flujo activo\n` +
         `/nuevo_admin <farmaciaId>|<whatsappNumber>|<nombre> — alta de farmacéutico\n` +
         `/farmacia <id> — detalle\n` +
         `/desactivar <id> — desactivar farmacia\n` +
@@ -49,39 +160,26 @@ export function buildTelegramBot() {
     return ctx.reply(lines.join('\n\n'));
   });
 
+  // --- Alta de farmacia: flujo conversacional ---
   bot.command('nueva_farmacia', async (ctx) => {
-    const raw = ctx.message.text.replace(/^\/nueva_farmacia\s*/, '');
-    const parts = raw.split('|').map((s) => s.trim());
-    if (parts.length < 2 || !parts[0] || !parts[1]) {
-      return ctx.reply('Uso: /nueva_farmacia <nombre>|<whatsappNumber>|<direccion opcional>');
-    }
-    const [nombre, whatsappNumberRaw, direccion = ''] = parts;
-    const whatsappNumber = whatsappNumberRaw.replace(/[^0-9]/g, '');
+    const chatId = ctx.chat.id;
+    // Si ya hay un flujo activo, lo reinicia
+    onboardingMap.set(chatId, { step: 'nombre', data: {} });
+    return ctx.reply(
+      '🆕 *Alta de nueva farmacia* — Vamos paso a paso\\.\n' +
+        'En cualquier momento escribí /cancelar para salir\\.\n\n' +
+        QUESTIONS.nombre,
+      { parse_mode: 'MarkdownV2' },
+    );
+  });
 
-    try {
-      const f = await prisma.farmacia.create({
-        data: {
-          nombre,
-          whatsappNumber,
-          direccion,
-          horarios: {
-            semana: 'Lunes a Viernes 8:00 a 20:00',
-            sabado: '9:00 a 14:00',
-            domingo: 'Cerrado',
-          },
-        },
-      });
-      await startPharmacySession(f.id).catch((err) =>
-        logger.error({ err }, 'Error iniciando sesión de nueva farmacia'),
-      );
-      return ctx.reply(
-        `✅ Farmacia creada.\nid: ${f.id}\n\nEscaneá el QR que aparece en los logs del servidor para emparejar el número ${whatsappNumber}.`,
-      );
-    } catch (err: unknown) {
-      logger.error({ err }, 'Error creando farmacia');
-      const msg = err instanceof Error ? err.message : 'desconocido';
-      return ctx.reply(`❌ Error: ${msg}`);
+  bot.command('cancelar', async (ctx) => {
+    const chatId = ctx.chat.id;
+    if (onboardingMap.has(chatId)) {
+      onboardingMap.delete(chatId);
+      return ctx.reply('❌ Flujo cancelado. Los datos no fueron guardados.');
     }
+    return ctx.reply('No hay ningún flujo activo para cancelar.');
   });
 
   bot.command('nuevo_admin', async (ctx) => {
@@ -169,6 +267,144 @@ export function buildTelegramBot() {
       `🔗 Escaneá el QR desde acá (se actualiza automáticamente):\n${qrLink(sid)}`,
       { link_preview_options: { is_disabled: true } },
     );
+  });
+
+  // --- Handler del flujo conversacional ---
+  bot.on('text', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const state = onboardingMap.get(chatId);
+    if (!state) return;
+
+    const text = ctx.message.text.trim();
+    // Los comandos los manejan sus handlers; acá solo procesamos respuestas libres
+    if (text.startsWith('/')) return;
+
+    const { step, data } = state;
+
+    // --- Paso de confirmación ---
+    if (step === 'confirmacion') {
+      const resp = text.toLowerCase();
+      if (resp === 'si') {
+        onboardingMap.delete(chatId);
+        try {
+          const f = await prisma.farmacia.create({
+            data: {
+              nombre:             data.nombre!,
+              whatsappNumber:     data.whatsapp!,
+              direccion:          data.direccion!,
+              telefonoFijo:       data.telefonoFijo ?? null,
+              horarios: {
+                semana:  data.horarioSemana!,
+                sabado:  data.horarioSabado === '-' ? '' : data.horarioSabado!,
+                domingo: data.horarioDomingo === '-' ? '' : data.horarioDomingo!,
+              },
+              delivery:           data.delivery!,
+              zonaDelivery:       data.zonaDelivery ?? '',
+              obrasSociales:      data.obrasSociales ?? [],
+              servicios:          data.servicios ?? [],
+              productosExcluidos: data.productosExcluidos ?? [],
+            },
+          });
+          await startPharmacySession(f.id).catch((err) =>
+            logger.error({ err }, 'Error iniciando sesión de nueva farmacia'),
+          );
+          return ctx.reply(
+            `✅ Farmacia creada.\nid: ${f.id}\n\n` +
+              `Para registrar a ${data.farmaceutico} como farmacéutico/a:\n` +
+              `/nuevo_admin ${f.id}|<número_WA>|${data.farmaceutico}\n\n` +
+              `Escaneá el QR que aparece en los logs para emparejar el número +${data.whatsapp}.`,
+          );
+        } catch (err: unknown) {
+          logger.error({ err }, 'Error creando farmacia en onboarding');
+          const msg = err instanceof Error ? err.message : 'desconocido';
+          return ctx.reply(`❌ Error al guardar: ${msg}`);
+        }
+      } else if (resp === 'no') {
+        onboardingMap.delete(chatId);
+        return ctx.reply('❌ Cancelado. Los datos no fueron guardados.');
+      } else {
+        return ctx.reply('Respondé "si" para guardar o "no" para cancelar.');
+      }
+    }
+
+    // --- Validación y almacenamiento por paso ---
+    let error: string | null = null;
+
+    switch (step) {
+      case 'nombre':
+        if (!text) { error = 'El nombre no puede estar vacío.'; break; }
+        data.nombre = text;
+        break;
+
+      case 'whatsapp': {
+        const nums = text.replace(/[^0-9]/g, '');
+        if (nums.length < 10) { error = 'Número inválido. Ingresá solo números (mínimo 10 dígitos).'; break; }
+        data.whatsapp = nums;
+        break;
+      }
+
+      case 'direccion':
+        data.direccion = text;
+        break;
+
+      case 'telefonoFijo':
+        data.telefonoFijo = text === '-' ? null : text;
+        break;
+
+      case 'horarioSemana':
+        data.horarioSemana = text;
+        break;
+
+      case 'horarioSabado':
+        data.horarioSabado = text;
+        break;
+
+      case 'horarioDomingo':
+        data.horarioDomingo = text;
+        break;
+
+      case 'delivery': {
+        const v = text.toLowerCase();
+        if (v !== 'si' && v !== 'no') { error = 'Respondé "si" o "no".'; break; }
+        data.delivery = v === 'si';
+        break;
+      }
+
+      case 'zonaDelivery':
+        data.zonaDelivery = text;
+        break;
+
+      case 'obrasSociales':
+        data.obrasSociales = text === '-' ? [] : splitList(text);
+        break;
+
+      case 'servicios':
+        data.servicios = text === '-' ? [] : splitList(text);
+        break;
+
+      case 'productosExcluidos':
+        data.productosExcluidos = text === '-' ? [] : splitList(text);
+        break;
+
+      case 'farmaceutico':
+        data.farmaceutico = text;
+        break;
+    }
+
+    if (error) {
+      return ctx.reply(`⚠️ ${error}`);
+    }
+
+    // Avanzar al siguiente paso
+    const next = nextStep(step, data.delivery ?? false);
+    if (!next) return;
+    state.step = next;
+
+    if (next === 'confirmacion') {
+      return ctx.reply(buildSummary(data), { parse_mode: 'MarkdownV2' });
+    }
+
+    return ctx.reply(QUESTIONS[next]);
   });
 
   bot.catch((err, ctx) => {
