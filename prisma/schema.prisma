@@ -16,8 +16,10 @@ model Farmacia {
   horarios            Json     @default("{}")
   delivery            Boolean  @default(true)
   zonaDelivery        String   @default("")
+  telefonoFijo        String?
   obrasSociales       String[] @default([])
   servicios           String[] @default([])
+  productosExcluidos  String[] @default([])
   // Prompt custom — si está presente pisa el prompt por defecto
   promptSistema       String?
   mensajeBienvenida   String   @default("")
