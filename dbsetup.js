@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import fs from 'node:fs'
 
 const env = { ...process.env }
 
-const url = new URL(process.env.DATABASE_URL)
-const target = url.protocol === 'file:' && url.pathname
-await exec('npx prisma migrate deploy')
-
-// launch application
-await exec(process.argv.slice(2).join(' '))
+try {
+  await exec('npx prisma migrate deploy')
+  await exec(process.argv.slice(2).join(' '))
+} catch (err) {
+  console.error(err?.message ?? err)
+  process.exit(1)
+}
 
 function exec(command) {
   const child = spawn(command, { shell: true, stdio: 'inherit', env })
