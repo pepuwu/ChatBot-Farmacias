@@ -5,6 +5,7 @@ const schema = z.object({
   DATABASE_URL: z.string().url(),
   OPENAI_API_KEY: z.string().min(1),
   OPENAI_MODEL: z.string().default('gpt-4.1-nano'),
+  OPENAI_MAX_RPM_PER_FARMACIA: z.coerce.number().int().default(30),
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_SUPER_ADMIN_ID: z.coerce.number().int(),
   TELEGRAM_WEBHOOK_URL: z.string().url().optional(),

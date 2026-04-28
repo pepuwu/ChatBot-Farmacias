@@ -244,11 +244,13 @@ async function confirmarOferta(remitente: string, pendiente: OfertaPendiente) {
   await prisma.ofertaPendiente.deleteMany({ where: { telefonoAdmin: remitente } });
   await reply(remitente, '📤 Enviando...');
   const telefonos = await getClientesTelefonos(pendiente.farmaciaId);
-  let ok = 0;
-  for (const t of telefonos) {
-    try { await sendFromPharmacy(pendiente.farmaciaId, t, pendiente.mensajeActual); ok++; }
-    catch (err) { logger.error({ err, to: t }, 'Error enviando oferta'); }
-  }
+  const resultados = await Promise.allSettled(
+    telefonos.map((t) => sendFromPharmacy(pendiente.farmaciaId, t, pendiente.mensajeActual)),
+  );
+  const ok = resultados.filter((r) => r.status === 'fulfilled').length;
+  resultados.forEach((r, i) => {
+    if (r.status === 'rejected') logger.error({ err: r.reason, to: telefonos[i] }, 'Error enviando oferta');
+  });
   await reply(remitente, `✅ Oferta enviada a ${ok}/${telefonos.length} clientes.`);
 }
 

@@ -7,6 +7,58 @@ const client = new OpenAI({ apiKey: config.OPENAI_API_KEY });
 
 type Horarios = { semana?: string; sabado?: string; domingo?: string };
 
+// ─── Rate limiter por farmacia ────────────────────────────────────────────────
+// Ventana deslizante de 1 minuto. En memoria: se resetea en reinicios, lo cual
+// es aceptable — el límite es para evitar explosión de costos, no auditoría.
+
+interface RateWindow {
+  count: number;
+  resetAt: number;
+}
+const rateWindows = new Map<string, RateWindow>();
+
+function consumeRateLimit(farmaciaId: string): boolean {
+  const now = Date.now();
+  const win = rateWindows.get(farmaciaId);
+
+  if (!win || now > win.resetAt) {
+    rateWindows.set(farmaciaId, { count: 1, resetAt: now + 60_000 });
+    return true;
+  }
+  if (win.count >= config.OPENAI_MAX_RPM_PER_FARMACIA) return false;
+  win.count++;
+  return true;
+}
+
+// ─── Llamada con retry en 429 ─────────────────────────────────────────────────
+
+async function callWithRetry(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+): Promise<string> {
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await client.chat.completions.create(
+        { model: config.OPENAI_MODEL, messages },
+        { timeout: 15_000 },
+      );
+      return response.choices[0]?.message?.content?.trim() ?? '';
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      if (status === 429 && attempt < MAX_RETRIES - 1) {
+        const delay = Math.pow(2, attempt) * 1_000;
+        logger.warn({ attempt, delay }, 'OpenAI 429 — reintentando');
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  return '';
+}
+
+// ─── Prompt del sistema ───────────────────────────────────────────────────────
+
 function buildSystemPrompt(farmacia: Farmacia, esPrimerMensaje: boolean): string {
   if (farmacia.promptSistema?.trim()) return farmacia.promptSistema;
 
@@ -59,12 +111,19 @@ ${telefono ? `7. TELÉFONO: Si el cliente pide el número de contacto, usá siem
 ${bloqueMenu}`;
 }
 
+// ─── API pública ──────────────────────────────────────────────────────────────
+
 export async function generarRespuesta(
   farmacia: Farmacia,
   historial: Mensaje[],
   mensajeActual: string,
   esPrimerMensaje = false,
 ): Promise<string> {
+  if (!consumeRateLimit(farmacia.id)) {
+    logger.warn({ farmaciaId: farmacia.id }, 'OpenAI: rate limit alcanzado');
+    return 'Estamos recibiendo muchas consultas en este momento. Por favor intentá de nuevo en unos segundos 🙏';
+  }
+
   const systemPrompt = buildSystemPrompt(farmacia, esPrimerMensaje);
 
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -81,11 +140,7 @@ export async function generarRespuesta(
   logger.info({ farmacia: farmacia.nombre, msgs: messages.length, primerMensaje: esPrimerMensaje }, 'OpenAI: enviando');
 
   try {
-    const response = await client.chat.completions.create(
-      { model: config.OPENAI_MODEL, messages },
-      { timeout: 15_000 },
-    );
-    const texto = response.choices[0]?.message?.content?.trim() ?? '';
+    const texto = await callWithRetry(messages);
     logger.info({ chars: texto.length }, 'OpenAI: respuesta recibida');
     return texto || 'Lo siento, no pude generar una respuesta. Probá de nuevo.';
   } catch (err) {
