@@ -39,6 +39,8 @@ class SessionManager {
   private handlers = new Set<MessageHandler>();
   private qrWaiters = new Map<string, Set<(qr: string) => void>>();
   private qrListeners = new Set<(sessionId: string, qr: string) => void>();
+  // Single-flight: evita lookups duplicados para el mismo número en vuelo
+  private jidLookups = new Map<string, Promise<string>>();
 
   onMessage(handler: MessageHandler) {
     this.handlers.add(handler);
@@ -284,17 +286,31 @@ class SessionManager {
    * Resuelve el JID canónico para un número vía `onWhatsApp`. WhatsApp moderno
    * puede requerir `@lid` específico por cuenta — confiar en este lookup evita
    * errores 463 por JID inválido.
+   *
+   * Usa single-flight: si ya hay un lookup en vuelo para el mismo número,
+   * devuelve la misma promesa en vez de disparar una segunda llamada de red.
    */
-  private async resolveJid(sock: WASocket, phoneNumber: string): Promise<string> {
+  private resolveJid(sock: WASocket, phoneNumber: string): Promise<string> {
     const num = phoneNumber.replace(/[^0-9]/g, '');
-    try {
-      const result = await sock.onWhatsApp(num);
-      const hit = result?.[0];
-      if (hit?.exists && hit.jid) return hit.jid;
-    } catch (err) {
-      logger.warn({ err, num }, 'onWhatsApp falló, usando JID por número');
-    }
-    return `${num}@s.whatsapp.net`;
+
+    const inflight = this.jidLookups.get(num);
+    if (inflight) return inflight;
+
+    const promise = (async () => {
+      try {
+        const result = await sock.onWhatsApp(num);
+        const hit = result?.[0];
+        if (hit?.exists && hit.jid) return hit.jid;
+      } catch (err) {
+        logger.warn({ err, num }, 'onWhatsApp falló, usando JID por número');
+      }
+      return `${num}@s.whatsapp.net`;
+    })().finally(() => {
+      this.jidLookups.delete(num);
+    });
+
+    this.jidLookups.set(num, promise);
+    return promise;
   }
 
   /** Envía texto a un JID completo (soporta `@lid` y `@s.whatsapp.net`). */
