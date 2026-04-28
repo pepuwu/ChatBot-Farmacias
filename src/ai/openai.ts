@@ -111,6 +111,21 @@ ${telefono ? `7. TELÉFONO: Si el cliente pide el número de contacto, usá siem
 ${bloqueMenu}`;
 }
 
+// ─── Transcripción de audio ───────────────────────────────────────────────────
+
+export async function transcribirAudio(buffer: Buffer, mimeType: string): Promise<string> {
+  // Whisper acepta ogg/opus (formato de WhatsApp) directamente
+  const ext = mimeType.includes('mp4') || mimeType.includes('m4a') ? 'm4a' : 'ogg';
+  const { toFile } = await import('openai');
+  const file = await toFile(buffer, `audio.${ext}`, { type: mimeType });
+  const response = await client.audio.transcriptions.create({
+    model: 'whisper-1',
+    file,
+    language: 'es',
+  });
+  return response.text.trim();
+}
+
 // ─── API pública ──────────────────────────────────────────────────────────────
 
 export async function generarRespuesta(

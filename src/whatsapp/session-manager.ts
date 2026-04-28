@@ -3,12 +3,14 @@ import fs from 'node:fs/promises';
 import qrcode from 'qrcode-terminal';
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   type WASocket,
   type proto,
   type UserFacingSocketConfig,
 } from '@whiskeysockets/baileys';
+import { transcribirAudio } from '../ai/openai.js';
 import { Boom } from '@hapi/boom';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -188,7 +190,31 @@ class SessionManager {
       logger.debug({ sessionId, type, count: messages.length }, 'messages.upsert');
       if (type !== 'notify') return;
       for (const m of messages) {
-        const normalized = this.normalize(m);
+        let normalized = this.normalize(m);
+
+        // Intentar transcribir si es un mensaje de audio/voz y no tiene texto
+        if (!normalized) {
+          const msgContent = m.message;
+          const isAudio = !!msgContent?.audioMessage;
+          if (isAudio && !m.key.fromMe) {
+            try {
+              const buf = await downloadMediaMessage(
+                m, 'buffer', {},
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                { logger: logger as any, reuploadRequest: sock.updateMediaMessage },
+              );
+              const mime = msgContent.audioMessage?.mimetype ?? 'audio/ogg; codecs=opus';
+              const transcript = await transcribirAudio(buf as Buffer, mime);
+              if (transcript) {
+                normalized = this.normalize(m, `🎤 ${transcript}`);
+                logger.info({ sessionId, transcript }, 'Audio transcripto');
+              }
+            } catch (err) {
+              logger.error({ err, sessionId }, 'Error transcribiendo audio');
+            }
+          }
+        }
+
         if (!normalized) {
           logger.debug({ sessionId, from: m.key.remoteJid }, 'Mensaje ignorado (grupo/status/sin texto)');
           continue;
@@ -210,7 +236,7 @@ class SessionManager {
     return sock;
   }
 
-  private normalize(m: proto.IWebMessageInfo): IncomingMessage | null {
+  private normalize(m: proto.IWebMessageInfo, textOverride?: string): IncomingMessage | null {
     const remoteJid = m.key.remoteJid;
     if (!remoteJid) return null;
     // Ignorar grupos y status
@@ -219,12 +245,13 @@ class SessionManager {
     const msg = m.message;
     if (!msg) return null;
 
-    const text =
+    const text = textOverride ?? (
       msg.conversation ??
       msg.extendedTextMessage?.text ??
       msg.imageMessage?.caption ??
       msg.videoMessage?.caption ??
-      '';
+      ''
+    );
 
     if (!text) return null;
 
