@@ -1,4 +1,4 @@
-import type { Farmacia } from '@prisma/client';
+import type { Farmacia, ControlActivo, OfertaPendiente } from '@prisma/client';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { sessionManager, type IncomingMessage } from './session-manager.js';
@@ -31,24 +31,6 @@ async function getClientesTelefonos(farmaciaId: string) {
   return rows.map((r) => r.telefono);
 }
 
-interface OfertaPendiente {
-  farmaciaId: string;
-  descripcionOriginal: string;
-  mensajeActual: string;
-}
-interface ControlActivo {
-  farmaciaId: string;
-  telefonoCliente: string;
-  conversacionId: string;
-}
-
-// Estado en memoria por farmacéutico
-const ofertasPendientes = new Map<string, OfertaPendiente>();
-const controlesActivos = new Map<string, ControlActivo>();
-// WhatsApp moderno entrega JIDs `@lid` anónimos; guardamos el último JID visto
-// por cada número para poder responder al JID correcto.
-const pnToJid = new Map<string, string>();
-
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 export async function startAdminSession() {
@@ -68,13 +50,13 @@ async function reply(telefono: string, text: string) {
   // WhatsApp moderno entrega JIDs `@lid` — si tenemos uno cacheado para este
   // número, usarlo directamente (el JID por número falla con 463 async en
   // cuentas que ya migraron a @lid).
-  const jid = pnToJid.get(telefono);
-  if (jid) {
+  const cached = await prisma.jidCache.findUnique({ where: { telefono } });
+  if (cached?.jid) {
     try {
-      await sessionManager.sendToJid(ADMIN_SESSION_ID, jid, text);
+      await sessionManager.sendToJid(ADMIN_SESSION_ID, cached.jid, text);
       return;
     } catch (errLid) {
-      logger.warn({ errLid, telefono, jid }, 'Envío por @lid falló, probando JID por número');
+      logger.warn({ errLid, telefono, jid: cached.jid }, 'Envío por @lid falló, probando JID por número');
     }
   }
   try {
@@ -108,7 +90,12 @@ export async function notificarPedido(farmacia: Farmacia, telefonoCliente: strin
 
 async function handleAdminMessage(msg: IncomingMessage) {
   const remitente = msg.phoneNumber;
-  pnToJid.set(remitente, msg.from);
+
+  await prisma.jidCache.upsert({
+    where: { telefono: remitente },
+    create: { telefono: remitente, jid: msg.from },
+    update: { jid: msg.from },
+  });
 
   const admin = await prisma.admin.findUnique({
     where: { whatsappNumber: remitente },
@@ -127,7 +114,7 @@ async function handleAdminMessage(msg: IncomingMessage) {
   logger.info({ remitente, farmacia: farmacia.nombre, text }, 'Msg de farmacéutico');
 
   // ── Oferta pendiente de confirmación ──
-  const pendiente = ofertasPendientes.get(remitente);
+  const pendiente = await prisma.ofertaPendiente.findUnique({ where: { telefonoAdmin: remitente } });
   if (pendiente) {
     if (lower === 'sí' || lower === 'si') { await confirmarOferta(remitente, pendiente); return; }
     if (lower === 'no') { await cancelarOferta(remitente); return; }
@@ -135,7 +122,7 @@ async function handleAdminMessage(msg: IncomingMessage) {
   }
 
   // ── Control activo: reenviar texto libre al cliente ──
-  const control = controlesActivos.get(remitente);
+  const control = await prisma.controlActivo.findUnique({ where: { telefonoAdmin: remitente } });
   if (control && !esComando(lower)) {
     await reenviarAlCliente(remitente, control, text);
     return;
@@ -188,10 +175,18 @@ async function handleTomar(remitente: string, farmacia: Farmacia, text: string) 
     return;
   }
 
-  controlesActivos.set(remitente, {
-    farmaciaId: farmacia.id,
-    telefonoCliente: telefono,
-    conversacionId: conv.id,
+  const yaOcupado = await prisma.controlActivo.findFirst({
+    where: { telefonoCliente: telefono, farmaciaId: farmacia.id, telefonoAdmin: { not: remitente } },
+  });
+  if (yaOcupado) {
+    await reply(remitente, `⚠️ ${telefono} ya está siendo atendido por @${yaOcupado.telefonoAdmin}.`);
+    return;
+  }
+
+  await prisma.controlActivo.upsert({
+    where: { telefonoAdmin: remitente },
+    create: { id: crypto.randomUUID(), telefonoAdmin: remitente, farmaciaId: farmacia.id, telefonoCliente: telefono, conversacionId: conv.id },
+    update: { farmaciaId: farmacia.id, telefonoCliente: telefono, conversacionId: conv.id },
   });
 
   await reply(
@@ -201,7 +196,7 @@ async function handleTomar(remitente: string, farmacia: Farmacia, text: string) 
 }
 
 async function handleFin(remitente: string, farmacia: Farmacia) {
-  controlesActivos.delete(remitente);
+  await prisma.controlActivo.deleteMany({ where: { telefonoAdmin: remitente } });
   const liberadas = await liberarConversacionesDeFarmacia(farmacia.id);
   if (liberadas.length === 0) {
     await reply(remitente, 'No tenías ninguna conversación activa.');
@@ -237,12 +232,16 @@ async function handleOferta(remitente: string, farmacia: Farmacia, text: string)
 
   await reply(remitente, '⏳ Generando mensaje con IA...');
   const mensajeGenerado = await generarMensajeOferta(farmacia, descripcion, null);
-  ofertasPendientes.set(remitente, { farmaciaId: farmacia.id, descripcionOriginal: descripcion, mensajeActual: mensajeGenerado });
+  await prisma.ofertaPendiente.upsert({
+    where: { telefonoAdmin: remitente },
+    create: { id: crypto.randomUUID(), telefonoAdmin: remitente, farmaciaId: farmacia.id, descripcionOriginal: descripcion, mensajeActual: mensajeGenerado },
+    update: { farmaciaId: farmacia.id, descripcionOriginal: descripcion, mensajeActual: mensajeGenerado },
+  });
   await reply(remitente, buildPreview(mensajeGenerado, cantidad));
 }
 
 async function confirmarOferta(remitente: string, pendiente: OfertaPendiente) {
-  ofertasPendientes.delete(remitente);
+  await prisma.ofertaPendiente.deleteMany({ where: { telefonoAdmin: remitente } });
   await reply(remitente, '📤 Enviando...');
   const telefonos = await getClientesTelefonos(pendiente.farmaciaId);
   let ok = 0;
@@ -254,7 +253,7 @@ async function confirmarOferta(remitente: string, pendiente: OfertaPendiente) {
 }
 
 async function cancelarOferta(remitente: string) {
-  ofertasPendientes.delete(remitente);
+  await prisma.ofertaPendiente.deleteMany({ where: { telefonoAdmin: remitente } });
   await reply(remitente, '❌ Oferta cancelada.');
 }
 
@@ -268,7 +267,10 @@ async function editarOferta(remitente: string, pendiente: OfertaPendiente, instr
 
   await reply(remitente, '⏳ Regenerando...');
   const nuevo = await generarMensajeOferta(farmacia, pendiente.descripcionOriginal, instrucciones);
-  ofertasPendientes.set(remitente, { ...pendiente, mensajeActual: nuevo });
+  await prisma.ofertaPendiente.update({
+    where: { telefonoAdmin: remitente },
+    data: { mensajeActual: nuevo },
+  });
   const cantidad = await getClientesCount(pendiente.farmaciaId);
   await reply(remitente, buildPreview(nuevo, cantidad));
 }
@@ -377,7 +379,7 @@ function buildPreview(mensaje: string, cantidad: number): string {
 }
 
 async function handleAyuda(remitente: string, farmacia: Farmacia) {
-  const control = controlesActivos.get(remitente);
+  const control = await prisma.controlActivo.findUnique({ where: { telefonoAdmin: remitente } });
   const estadoControl = control
     ? `\n📞 Ahora mismo estás hablando con ${control.telefonoCliente}. Escribí "fin" para terminar.\n`
     : '';
@@ -396,6 +398,6 @@ async function handleAyuda(remitente: string, farmacia: Farmacia) {
       `espera [teléfono] [producto] — agregar cliente\n` +
       `lista_espera — ver lista\n` +
       `avisar [producto] — notificar que llegó\n\n` +
-      `*Tip:* cuando tomás control, todo lo que escribas le llega al cliente.`,
+      `*Tip:* cuando tomás control, todo lo que escribás le llega al cliente.`,
   );
 }

@@ -100,3 +100,30 @@ model ListaEspera {
 
   @@index([farmaciaId, notificado])
 }
+
+// Estado del farmacéutico que tomó control de una conversación
+model ControlActivo {
+  id               String   @id @default(cuid())
+  telefonoAdmin    String   @unique
+  farmaciaId       String
+  telefonoCliente  String
+  conversacionId   String
+  createdAt        DateTime @default(now())
+}
+
+// Oferta generada por IA esperando confirmación del farmacéutico
+model OfertaPendiente {
+  id                  String   @id @default(cuid())
+  telefonoAdmin       String   @unique
+  farmaciaId          String
+  descripcionOriginal String
+  mensajeActual       String
+  createdAt           DateTime @default(now())
+}
+
+// Caché de JID @lid de WhatsApp por número de teléfono
+model JidCache {
+  telefono  String   @id
+  jid       String
+  updatedAt DateTime @updatedAt
+}
