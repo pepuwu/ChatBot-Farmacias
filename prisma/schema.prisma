@@ -26,6 +26,10 @@ model Farmacia {
   mensajeDerivacion   String   @default("Para eso te comunico con nuestro farmacéutico.")
   tiempoSesionMinutos Int      @default(10)
   activa              Boolean  @default(true)
+  // Mercado Pago — tokens OAuth del farmacéutico conectado
+  mpAccessToken       String?
+  mpRefreshToken      String?
+  mpUserId            String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 

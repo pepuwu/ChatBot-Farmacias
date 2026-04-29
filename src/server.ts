@@ -5,6 +5,8 @@ import { config } from './config.js';
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { sessionManager } from './whatsapp/session-manager.js';
+import { exchangeCode, obtenerPago, validarWebhookMP } from './services/mercadopago.js';
+import { notificarPagoConfirmado } from './whatsapp/admin-bot.js';
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -85,6 +87,86 @@ export async function buildServer(telegramBot?: Telegraf<Context>) {
     reply.type('image/png').header('cache-control', 'no-store');
     return png;
   });
+
+  // ─── Mercado Pago OAuth callback ────────────────────────────────────────────
+  app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
+    '/auth/mp/callback',
+    async (request, reply) => {
+      const { code, state: farmaciaId, error } = request.query;
+
+      if (error || !code || !farmaciaId) {
+        logger.warn({ error, farmaciaId }, 'MP OAuth cancelado o inválido');
+        reply.type('text/html');
+        return '<h2>Autorización cancelada. Podés cerrar esta ventana.</h2>';
+      }
+
+      try {
+        const { accessToken, refreshToken, userId } = await exchangeCode(code);
+        await prisma.farmacia.update({
+          where: { id: farmaciaId },
+          data: { mpAccessToken: accessToken, mpRefreshToken: refreshToken, mpUserId: userId },
+        });
+
+        // Notificar a los admins de esa farmacia
+        const admins = await prisma.admin.findMany({ where: { farmaciaId } });
+        for (const admin of admins) {
+          try {
+            await sessionManager.sendText('admin', admin.whatsappNumber,
+              '✅ Mercado Pago conectado correctamente. Ya podés usar "cobrar [teléfono] [monto]".');
+          } catch { /* sesión puede no estar lista */ }
+        }
+
+        logger.info({ farmaciaId, userId }, 'MP OAuth completado');
+        reply.type('text/html');
+        return '<h2>✅ Mercado Pago conectado. Podés cerrar esta ventana.</h2>';
+      } catch (err) {
+        logger.error({ err, farmaciaId }, 'Error en MP OAuth callback');
+        reply.type('text/html');
+        return '<h2>Hubo un error al conectar. Intentá de nuevo desde el bot.</h2>';
+      }
+    },
+  );
+
+  // ─── Mercado Pago webhook ────────────────────────────────────────────────────
+  app.post<{ Body: { type?: string; data?: { id?: string }; user_id?: string | number } }>(
+    '/webhooks/mp',
+    async (request, reply) => {
+      const xSig = request.headers['x-signature'] as string | undefined;
+      const xReqId = request.headers['x-request-id'] as string | undefined;
+      const dataId = request.body?.data?.id;
+      const ts = (xSig ?? '').split(',').find((p) => p.startsWith('ts='))?.slice(3);
+
+      if (!validarWebhookMP(xSig, xReqId, dataId, ts)) {
+        reply.code(401);
+        return { ok: false };
+      }
+
+      if (request.body?.type !== 'payment' || !dataId) return { ok: true };
+
+      // MP envía el user_id del vendedor (farmacia) en el payload
+      const mpUserId = String(request.body?.user_id ?? '');
+
+      try {
+        const farmacia = await prisma.farmacia.findFirst({
+          where: { mpUserId, mpAccessToken: { not: null } },
+        });
+        if (!farmacia?.mpAccessToken) return { ok: true };
+
+        const pago = await obtenerPago(farmacia.mpAccessToken, dataId);
+        if (pago.status !== 'approved') return { ok: true };
+
+        const [farmaciaId, telefonoCliente] = (pago.external_reference ?? '').split(':');
+        if (!farmaciaId || !telefonoCliente) return { ok: true };
+
+        await notificarPagoConfirmado(farmaciaId, telefonoCliente, pago.transaction_amount ?? 0);
+        logger.info({ farmaciaId, telefonoCliente, monto: pago.transaction_amount }, 'Pago MP confirmado');
+      } catch (err) {
+        logger.error({ err, dataId }, 'Error procesando webhook MP');
+      }
+
+      return { ok: true };
+    },
+  );
 
   if (telegramBot && config.TELEGRAM_WEBHOOK_URL) {
     const webhookPath = new URL(config.TELEGRAM_WEBHOOK_URL).pathname || '/telegram/webhook';

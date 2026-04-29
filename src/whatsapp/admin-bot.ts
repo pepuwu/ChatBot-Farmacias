@@ -13,6 +13,7 @@ import {
   tomarControl,
 } from '../services/conversation.js';
 import { generarMensajeOferta } from '../ai/openai.js';
+import { buildOAuthUrl, crearPreferenciaPago } from '../services/mercadopago.js';
 
 export const ADMIN_SESSION_ID = 'admin';
 
@@ -67,6 +68,18 @@ async function reply(telefono: string, text: string) {
 }
 
 // ─── Notificación de pedido ──────────────────────────────────────────────────
+
+export async function notificarPagoConfirmado(farmaciaId: string, telefonoCliente: string, monto: number) {
+  const admins = await prisma.admin.findMany({ where: { farmaciaId } });
+  for (const a of admins) {
+    await reply(a.whatsappNumber,
+      `✅ *Pago confirmado*\n\n` +
+      `👤 Cliente: ${telefonoCliente}\n` +
+      `💰 Monto: $${monto.toLocaleString('es-AR')}\n\n` +
+      `Preparar y coordinar entrega 📦`,
+    );
+  }
+}
 
 export async function notificarPedido(farmacia: Farmacia, telefonoCliente: string, textoPedido: string) {
   const admins = await prisma.admin.findMany({ where: { farmaciaId: farmacia.id } });
@@ -137,6 +150,9 @@ async function handleAdminMessage(msg: IncomingMessage) {
   if (lower.startsWith('espera '))       { await handleAgregarEspera(remitente, farmacia, text); return; }
   if (lower === 'lista_espera' || lower === 'espera') { await handleListaEspera(remitente, farmacia); return; }
   if (lower.startsWith('avisar '))       { await handleAvisar(remitente, farmacia, text); return; }
+  if (lower === 'conectar mp')              { await handleConectarMP(remitente, farmacia); return; }
+  if (lower === 'mp estado')               { await handleMPEstado(remitente, farmacia); return; }
+  if (lower.startsWith('cobrar '))         { await handleCobrar(remitente, farmacia, text); return; }
   if (lower === 'ayuda' || lower === 'help' || lower === 'hola') { await handleAyuda(remitente, farmacia); return; }
 
   // Default: si no hay control activo, mostrar ayuda
@@ -367,6 +383,69 @@ async function handleAvisar(remitente: string, farmacia: Farmacia, text: string)
   await reply(remitente, `✅ Notificados ${ok}/${esperas.length} clientes para "${producto}".`);
 }
 
+// ─── Mercado Pago ─────────────────────────────────────────────────────────────
+
+async function handleConectarMP(remitente: string, farmacia: Farmacia) {
+  const url = buildOAuthUrl(farmacia.id);
+  await reply(remitente,
+    `💳 Para conectar Mercado Pago a *${farmacia.nombre}*:\n\n` +
+    `1. Abrí este link en tu celular:\n${url}\n\n` +
+    `2. Iniciá sesión con tu cuenta de Mercado Pago\n` +
+    `3. Tocá "Permitir"\n\n` +
+    `El bot te avisa cuando esté conectado ✅`,
+  );
+}
+
+async function handleMPEstado(remitente: string, farmacia: Farmacia) {
+  if (farmacia.mpAccessToken) {
+    await reply(remitente, `✅ Mercado Pago conectado (cuenta MP: ${farmacia.mpUserId ?? '—'})`);
+  } else {
+    await reply(remitente, `❌ Mercado Pago no conectado. Escribí "conectar mp" para vincularlo.`);
+  }
+}
+
+async function handleCobrar(remitente: string, farmacia: Farmacia, text: string) {
+  if (!farmacia.mpAccessToken) {
+    await reply(remitente, '❌ Primero conectá Mercado Pago escribiendo "conectar mp".');
+    return;
+  }
+
+  // "cobrar [telefono] [monto]"
+  const partes = text.replace(/^cobrar\s+/i, '').trim().split(/\s+/);
+  if (partes.length < 2) {
+    await reply(remitente, 'Uso: cobrar [teléfono] [monto]\nEj: cobrar 5491123456789 2500');
+    return;
+  }
+  const telefono = partes[0]!.replace(/[^0-9]/g, '');
+  const monto = parseFloat(partes[1]!.replace(',', '.'));
+
+  if (!telefono || isNaN(monto) || monto <= 0) {
+    await reply(remitente, 'Uso: cobrar [teléfono] [monto]\nEj: cobrar 5491123456789 2500');
+    return;
+  }
+
+  try {
+    await reply(remitente, '⏳ Generando link de pago...');
+    const link = await crearPreferenciaPago(
+      farmacia.mpAccessToken,
+      farmacia.id,
+      farmacia.nombre,
+      telefono,
+      monto,
+    );
+    await sendFromPharmacy(farmacia.id, telefono,
+      `💳 Tu pedido está listo.\n\n` +
+      `💰 Total: $${monto.toLocaleString('es-AR')}\n\n` +
+      `Pagá acá 👉 ${link}\n\n` +
+      `Una vez confirmado el pago preparamos tu pedido 🙌`,
+    );
+    await reply(remitente, `✅ Link de pago enviado a ${telefono} por $${monto.toLocaleString('es-AR')}`);
+  } catch (err) {
+    logger.error({ err }, 'Error creando preferencia MP');
+    await reply(remitente, '❌ No pude generar el link de pago. Revisá que MP esté conectado correctamente.');
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function buildPreview(mensaje: string, cantidad: number): string {
@@ -400,6 +479,10 @@ async function handleAyuda(remitente: string, farmacia: Farmacia) {
       `espera [teléfono] [producto] — agregar cliente\n` +
       `lista_espera — ver lista\n` +
       `avisar [producto] — notificar que llegó\n\n` +
+      `*Pagos (Mercado Pago):*\n` +
+      `conectar mp — vincular cuenta de MP\n` +
+      `cobrar [teléfono] [monto] — enviar link de pago\n` +
+      `mp estado — ver si MP está conectado\n\n` +
       `*Tip:* cuando tomás control, todo lo que escribás le llega al cliente.`,
   );
 }
