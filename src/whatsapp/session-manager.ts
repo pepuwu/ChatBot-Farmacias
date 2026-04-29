@@ -3,12 +3,14 @@ import fs from 'node:fs/promises';
 import qrcode from 'qrcode-terminal';
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   type WASocket,
   type proto,
   type UserFacingSocketConfig,
 } from '@whiskeysockets/baileys';
+import { transcribirAudio } from '../ai/openai.js';
 import { Boom } from '@hapi/boom';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -37,6 +39,8 @@ class SessionManager {
   private handlers = new Set<MessageHandler>();
   private qrWaiters = new Map<string, Set<(qr: string) => void>>();
   private qrListeners = new Set<(sessionId: string, qr: string) => void>();
+  // Single-flight: evita lookups duplicados para el mismo número en vuelo
+  private jidLookups = new Map<string, Promise<string>>();
 
   onMessage(handler: MessageHandler) {
     this.handlers.add(handler);
@@ -188,7 +192,31 @@ class SessionManager {
       logger.debug({ sessionId, type, count: messages.length }, 'messages.upsert');
       if (type !== 'notify') return;
       for (const m of messages) {
-        const normalized = this.normalize(m);
+        let normalized = this.normalize(m);
+
+        // Intentar transcribir si es un mensaje de audio/voz y no tiene texto
+        if (!normalized) {
+          const msgContent = m.message;
+          const isAudio = !!msgContent?.audioMessage;
+          if (isAudio && !m.key.fromMe) {
+            try {
+              const buf = await downloadMediaMessage(
+                m, 'buffer', {},
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                { logger: logger as any, reuploadRequest: sock.updateMediaMessage },
+              );
+              const mime = msgContent.audioMessage?.mimetype ?? 'audio/ogg; codecs=opus';
+              const transcript = await transcribirAudio(buf as Buffer, mime);
+              if (transcript) {
+                normalized = this.normalize(m, `🎤 ${transcript}`);
+                logger.info({ sessionId, transcript }, 'Audio transcripto');
+              }
+            } catch (err) {
+              logger.error({ err, sessionId }, 'Error transcribiendo audio');
+            }
+          }
+        }
+
         if (!normalized) {
           logger.debug({ sessionId, from: m.key.remoteJid }, 'Mensaje ignorado (grupo/status/sin texto)');
           continue;
@@ -210,7 +238,7 @@ class SessionManager {
     return sock;
   }
 
-  private normalize(m: proto.IWebMessageInfo): IncomingMessage | null {
+  private normalize(m: proto.IWebMessageInfo, textOverride?: string): IncomingMessage | null {
     const remoteJid = m.key.remoteJid;
     if (!remoteJid) return null;
     // Ignorar grupos y status
@@ -219,12 +247,13 @@ class SessionManager {
     const msg = m.message;
     if (!msg) return null;
 
-    const text =
+    const text = textOverride ?? (
       msg.conversation ??
       msg.extendedTextMessage?.text ??
       msg.imageMessage?.caption ??
       msg.videoMessage?.caption ??
-      '';
+      ''
+    );
 
     if (!text) return null;
 
@@ -257,17 +286,31 @@ class SessionManager {
    * Resuelve el JID canónico para un número vía `onWhatsApp`. WhatsApp moderno
    * puede requerir `@lid` específico por cuenta — confiar en este lookup evita
    * errores 463 por JID inválido.
+   *
+   * Usa single-flight: si ya hay un lookup en vuelo para el mismo número,
+   * devuelve la misma promesa en vez de disparar una segunda llamada de red.
    */
-  private async resolveJid(sock: WASocket, phoneNumber: string): Promise<string> {
+  private resolveJid(sock: WASocket, phoneNumber: string): Promise<string> {
     const num = phoneNumber.replace(/[^0-9]/g, '');
-    try {
-      const result = await sock.onWhatsApp(num);
-      const hit = result?.[0];
-      if (hit?.exists && hit.jid) return hit.jid;
-    } catch (err) {
-      logger.warn({ err, num }, 'onWhatsApp falló, usando JID por número');
-    }
-    return `${num}@s.whatsapp.net`;
+
+    const inflight = this.jidLookups.get(num);
+    if (inflight) return inflight;
+
+    const promise = (async () => {
+      try {
+        const result = await sock.onWhatsApp(num);
+        const hit = result?.[0];
+        if (hit?.exists && hit.jid) return hit.jid;
+      } catch (err) {
+        logger.warn({ err, num }, 'onWhatsApp falló, usando JID por número');
+      }
+      return `${num}@s.whatsapp.net`;
+    })().finally(() => {
+      this.jidLookups.delete(num);
+    });
+
+    this.jidLookups.set(num, promise);
+    return promise;
   }
 
   /** Envía texto a un JID completo (soporta `@lid` y `@s.whatsapp.net`). */
