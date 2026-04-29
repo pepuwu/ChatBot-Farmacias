@@ -1,4 +1,4 @@
-import { Telegraf, type Context } from 'telegraf';
+import { Telegraf, Markup, type Context } from 'telegraf';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { prisma } from '../db.js';
@@ -11,6 +11,7 @@ import { ADMIN_SESSION_ID, startAdminSession } from '../whatsapp/admin-bot.js';
  * - Dar de alta / listar / dar de baja farmacias
  * - Dar de alta farmacéuticos (admins por farmacia)
  * - Ver estado de las sesiones de WhatsApp
+ * - Editar datos de farmacias con panel interactivo
  */
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,6 @@ const QUESTIONS: Record<Exclude<OnboardingStep, 'confirmacion'>, string> = {
   farmaceutico:       '👤 ¿Cómo se llama el farmacéutico/a principal?',
 };
 
-/** Devuelve la lista de pasos en orden, omitiendo zonaDelivery si delivery=false */
 function stepsFor(delivery: boolean): OnboardingStep[] {
   return [
     'nombre', 'whatsapp', 'direccion', 'telefonoFijo',
@@ -120,6 +120,156 @@ function buildSummary(data: Partial<OnboardingData>): string {
 }
 
 // ---------------------------------------------------------------------------
+// Panel de edición de farmacia
+// ---------------------------------------------------------------------------
+
+type EditableField =
+  | 'nombre' | 'direccion' | 'telefonoFijo'
+  | 'horarioSemana' | 'horarioSabado' | 'horarioDomingo'
+  | 'delivery' | 'zonaDelivery'
+  | 'obrasSociales' | 'servicios' | 'productosExcluidos'
+  | 'mensajeBienvenida' | 'mensajeDerivacion' | 'tiempoSesionMinutos' | 'promptSistema';
+
+interface EditState { farmaciaId: string; field: EditableField | null }
+const editMap = new Map<number, EditState>();
+
+const FIELD_LABELS: Record<EditableField, string> = {
+  nombre: 'Nombre', direccion: 'Dirección', telefonoFijo: 'Tel. fijo',
+  horarioSemana: 'Horario L-V', horarioSabado: 'Horario Sáb', horarioDomingo: 'Horario Dom',
+  delivery: 'Delivery', zonaDelivery: 'Zona delivery',
+  obrasSociales: 'Obras sociales', servicios: 'Servicios', productosExcluidos: 'Excluidos',
+  mensajeBienvenida: 'Bienvenida', mensajeDerivacion: 'Derivación',
+  tiempoSesionMinutos: 'Tiempo sesión', promptSistema: 'Prompt custom',
+};
+
+const FIELD_PROMPTS: Record<EditableField, string> = {
+  nombre:             '¿Cuál es el nuevo nombre?',
+  direccion:          '¿Cuál es la nueva dirección?',
+  telefonoFijo:       '¿Cuál es el nuevo teléfono fijo? (o "-" para eliminar)',
+  horarioSemana:      '¿Nuevo horario L-V? (ej: "8:00 a 20:00")',
+  horarioSabado:      '¿Nuevo horario sábado? (ej: "9:00 a 13:00", o "-" si no abre)',
+  horarioDomingo:     '¿Nuevo horario domingo? (ej: "10:00 a 13:00", o "-" si no abre)',
+  delivery:           '¿Hace delivery? Respondé "si" o "no"',
+  zonaDelivery:       '¿Cuál es la zona de cobertura?',
+  obrasSociales:      '¿Cuáles obras sociales? (separadas por comas, o "-" para ninguna)',
+  servicios:          '¿Cuáles servicios? (separados por comas, o "-" para ninguno)',
+  productosExcluidos: '¿Qué productos excluyen? (separados por comas, o "-" para ninguno)',
+  mensajeBienvenida:  '¿Cuál es el nuevo mensaje de bienvenida?',
+  mensajeDerivacion:  '¿Cuál es el nuevo mensaje de derivación al farmacéutico?',
+  tiempoSesionMinutos: '¿Cuántos minutos dura la sesión sin actividad? (número entero)',
+  promptSistema:      '¿Cuál es el nuevo prompt del sistema? (o "-" para usar el por defecto)',
+};
+
+type FarmaciaRow = {
+  id: string; nombre: string; direccion: string; telefonoFijo: string | null;
+  horarios: unknown; delivery: boolean; zonaDelivery: string;
+  obrasSociales: string[]; servicios: string[]; productosExcluidos: string[];
+  mensajeBienvenida: string; mensajeDerivacion: string;
+  tiempoSesionMinutos: number; promptSistema: string | null;
+};
+
+function buildFarmaciaPanel(f: FarmaciaRow): string {
+  const h = (f.horarios as { semana?: string; sabado?: string; domingo?: string }) ?? {};
+  const obras = f.obrasSociales.length ? f.obrasSociales.join(', ') : '—';
+  const servs = f.servicios.length ? f.servicios.join(', ') : '—';
+  const excl = f.productosExcluidos.length ? f.productosExcluidos.join(', ') : '—';
+  return (
+    `📋 ${f.nombre}\n` +
+    `id: ${f.id}\n\n` +
+    `📍 Dirección: ${f.direccion || '—'}\n` +
+    `☎️ Tel. fijo: ${f.telefonoFijo || '—'}\n` +
+    `🕐 L-V: ${h.semana || '—'}\n` +
+    `🕐 Sáb: ${h.sabado || '—'}\n` +
+    `🕐 Dom: ${h.domingo || '—'}\n` +
+    `🛵 Delivery: ${f.delivery ? `Sí — ${f.zonaDelivery || '—'}` : 'No'}\n` +
+    `🏥 Obras sociales: ${obras}\n` +
+    `⚕️ Servicios: ${servs}\n` +
+    `🚫 Excluidos: ${excl}\n` +
+    `💬 Bienvenida: ${f.mensajeBienvenida || '—'}\n` +
+    `🔀 Derivación: ${f.mensajeDerivacion}\n` +
+    `⏱ Sesión: ${f.tiempoSesionMinutos} min\n` +
+    `🤖 Prompt custom: ${f.promptSistema ? '✅ configurado' : '—'}\n\n` +
+    `Tocá un campo para editarlo:`
+  );
+}
+
+function buildEditKeyboard(farmaciaId: string) {
+  const fields: EditableField[] = [
+    'nombre', 'direccion', 'telefonoFijo',
+    'horarioSemana', 'horarioSabado', 'horarioDomingo',
+    'delivery', 'zonaDelivery',
+    'obrasSociales', 'servicios', 'productosExcluidos',
+    'mensajeBienvenida', 'mensajeDerivacion', 'tiempoSesionMinutos', 'promptSistema',
+  ];
+  const rows = [];
+  for (let i = 0; i < fields.length; i += 2) {
+    const row = [Markup.button.callback(`✏️ ${FIELD_LABELS[fields[i]!]}`, `ec:${farmaciaId}:${fields[i]}`)];
+    if (fields[i + 1]) row.push(Markup.button.callback(`✏️ ${FIELD_LABELS[fields[i + 1]!]}`, `ec:${farmaciaId}:${fields[i + 1]}`));
+    rows.push(row);
+  }
+  rows.push([Markup.button.callback('✅ Cerrar', 'ec_close')]);
+  return Markup.inlineKeyboard(rows);
+}
+
+async function applyFieldEdit(farmaciaId: string, field: EditableField, value: string): Promise<string | null> {
+  switch (field) {
+    case 'nombre':
+      if (!value) return 'El nombre no puede estar vacío.';
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { nombre: value } });
+      break;
+    case 'direccion':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { direccion: value } });
+      break;
+    case 'telefonoFijo':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { telefonoFijo: value === '-' ? null : value } });
+      break;
+    case 'horarioSemana':
+    case 'horarioSabado':
+    case 'horarioDomingo': {
+      const key = field === 'horarioSemana' ? 'semana' : field === 'horarioSabado' ? 'sabado' : 'domingo';
+      const cur = await prisma.farmacia.findUnique({ where: { id: farmaciaId }, select: { horarios: true } });
+      const h = ((cur?.horarios ?? {}) as Record<string, string>);
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { horarios: { ...h, [key]: value === '-' ? '' : value } } });
+      break;
+    }
+    case 'delivery': {
+      const v = value.toLowerCase();
+      if (v !== 'si' && v !== 'sí' && v !== 'no') return 'Respondé "si" o "no".';
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { delivery: v !== 'no' } });
+      break;
+    }
+    case 'zonaDelivery':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { zonaDelivery: value } });
+      break;
+    case 'obrasSociales':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { obrasSociales: value === '-' ? [] : splitList(value) } });
+      break;
+    case 'servicios':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { servicios: value === '-' ? [] : splitList(value) } });
+      break;
+    case 'productosExcluidos':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { productosExcluidos: value === '-' ? [] : splitList(value) } });
+      break;
+    case 'mensajeBienvenida':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { mensajeBienvenida: value } });
+      break;
+    case 'mensajeDerivacion':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { mensajeDerivacion: value } });
+      break;
+    case 'tiempoSesionMinutos': {
+      const n = parseInt(value, 10);
+      if (isNaN(n) || n < 1) return 'Ingresá un número válido (mínimo 1).';
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { tiempoSesionMinutos: n } });
+      break;
+    }
+    case 'promptSistema':
+      await prisma.farmacia.update({ where: { id: farmaciaId }, data: { promptSistema: value === '-' ? null : value } });
+      break;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Bot principal
 // ---------------------------------------------------------------------------
 
@@ -140,6 +290,7 @@ export function buildTelegramBot() {
         `Comandos:\n` +
         `/farmacias — listar farmacias\n` +
         `/nueva_farmacia — alta de farmacia (flujo paso a paso)\n` +
+        `/editar [farmaciaId] — editar datos de una farmacia\n` +
         `/cancelar — cancelar flujo activo\n` +
         `/nuevo_admin <farmaciaId>|<whatsappNumber>|<nombre> — alta de farmacéutico\n` +
         `/farmacia <id> — detalle\n` +
@@ -163,7 +314,6 @@ export function buildTelegramBot() {
   // --- Alta de farmacia: flujo conversacional ---
   bot.command('nueva_farmacia', async (ctx) => {
     const chatId = ctx.chat.id;
-    // Si ya hay un flujo activo, lo reinicia
     onboardingMap.set(chatId, { step: 'nombre', data: {} });
     return ctx.reply(
       '🆕 *Alta de nueva farmacia* — Vamos paso a paso\\.\n' +
@@ -175,11 +325,61 @@ export function buildTelegramBot() {
 
   bot.command('cancelar', async (ctx) => {
     const chatId = ctx.chat.id;
-    if (onboardingMap.has(chatId)) {
+    if (onboardingMap.has(chatId) || editMap.has(chatId)) {
       onboardingMap.delete(chatId);
-      return ctx.reply('❌ Flujo cancelado. Los datos no fueron guardados.');
+      editMap.delete(chatId);
+      return ctx.reply('❌ Flujo cancelado.');
     }
     return ctx.reply('No hay ningún flujo activo para cancelar.');
+  });
+
+  // --- Editar farmacia ---
+  bot.command('editar', async (ctx) => {
+    const arg = ctx.message.text.replace(/^\/editar\s*/, '').trim();
+
+    if (arg) {
+      const f = await prisma.farmacia.findUnique({ where: { id: arg } });
+      if (!f) return ctx.reply('Farmacia no encontrada.');
+      editMap.set(ctx.chat.id, { farmaciaId: f.id, field: null });
+      return ctx.reply(buildFarmaciaPanel(f), buildEditKeyboard(f.id));
+    }
+
+    const lista = await prisma.farmacia.findMany({ orderBy: { createdAt: 'asc' } });
+    if (lista.length === 0) return ctx.reply('No hay farmacias cargadas.');
+    if (lista.length === 1) {
+      const f = lista[0]!;
+      editMap.set(ctx.chat.id, { farmaciaId: f.id, field: null });
+      return ctx.reply(buildFarmaciaPanel(f), buildEditKeyboard(f.id));
+    }
+    const buttons = lista.map((f) => [Markup.button.callback(`${f.activa ? '🟢' : '🔴'} ${f.nombre}`, `ef:${f.id}`)]);
+    return ctx.reply('¿Cuál farmacia querés editar?', Markup.inlineKeyboard(buttons));
+  });
+
+  // Callback: selección de farmacia desde lista
+  bot.action(/^ef:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const farmaciaId = ctx.match[1]!;
+    const f = await prisma.farmacia.findUnique({ where: { id: farmaciaId } });
+    if (!f) return;
+    editMap.set(ctx.chat!.id, { farmaciaId: f.id, field: null });
+    return ctx.editMessageText(buildFarmaciaPanel(f), buildEditKeyboard(f.id));
+  });
+
+  // Callback: selección de campo a editar
+  bot.action(/^ec:([^:]+):(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const farmaciaId = ctx.match[1]!;
+    const field = ctx.match[2]!;
+    editMap.set(ctx.chat!.id, { farmaciaId, field: field as EditableField });
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    return ctx.reply(`${FIELD_PROMPTS[field as EditableField]}\n\n/cancelar para cancelar`);
+  });
+
+  // Callback: cerrar panel
+  bot.action('ec_close', async (ctx) => {
+    await ctx.answerCbQuery();
+    editMap.delete(ctx.chat!.id);
+    return ctx.editMessageReplyMarkup({ inline_keyboard: [] });
   });
 
   bot.command('nuevo_admin', async (ctx) => {
@@ -269,19 +469,30 @@ export function buildTelegramBot() {
     );
   });
 
-  // --- Handler del flujo conversacional ---
+  // --- Handler de texto libre (onboarding + edición) ---
   bot.on('text', async (ctx) => {
     const chatId = ctx.chat.id;
+    const text = ctx.message.text.trim();
+    if (text.startsWith('/')) return;
+
+    // Edición de campo
+    const editState = editMap.get(chatId);
+    if (editState?.field) {
+      const err = await applyFieldEdit(editState.farmaciaId, editState.field, text);
+      editState.field = null;
+      if (err) return ctx.reply(`⚠️ ${err}`);
+      const updated = await prisma.farmacia.findUnique({ where: { id: editState.farmaciaId } });
+      if (!updated) return;
+      await ctx.reply('✅ Guardado.');
+      return ctx.reply(buildFarmaciaPanel(updated), buildEditKeyboard(updated.id));
+    }
+
+    // Onboarding
     const state = onboardingMap.get(chatId);
     if (!state) return;
 
-    const text = ctx.message.text.trim();
-    // Los comandos los manejan sus handlers; acá solo procesamos respuestas libres
-    if (text.startsWith('/')) return;
-
     const { step, data } = state;
 
-    // --- Paso de confirmación ---
     if (step === 'confirmacion') {
       const resp = text.toLowerCase();
       if (resp === 'si') {
@@ -327,7 +538,6 @@ export function buildTelegramBot() {
       }
     }
 
-    // --- Validación y almacenamiento por paso ---
     let error: string | null = null;
 
     switch (step) {
@@ -395,7 +605,6 @@ export function buildTelegramBot() {
       return ctx.reply(`⚠️ ${error}`);
     }
 
-    // Avanzar al siguiente paso
     const next = nextStep(step, data.delivery ?? false);
     if (!next) return;
     state.step = next;
