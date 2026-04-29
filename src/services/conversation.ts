@@ -1,18 +1,11 @@
 import type { Conversacion, Farmacia, Mensaje } from '@prisma/client';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { generarRespuesta } from '../ai/openai.js';
-
-const PALABRAS_PEDIDO = [
-  'pedido', 'delivery', 'enviame', 'enviá', 'envíame', 'enviar',
-  'quiero que me envíen', 'quiero que me envien', 'reservar', 'reserva',
-  'mandar', 'mandame', 'mandá', 'llevar', 'necesito que me traigan',
-  'a domicilio', 'me lo mandas', 'me lo mandás',
-];
+import { generarRespuesta, type PedidoConfirmado } from '../ai/openai.js';
 
 export interface HandleResult {
   respuesta: string | null;
-  pedidoDetectado: boolean;
+  pedidoConfirmado?: PedidoConfirmado;
   esClienteNuevo: boolean;
   conversacionId: string;
   clienteTelefono: string;
@@ -64,11 +57,6 @@ async function obtenerHistorial(conversacionId: string): Promise<Mensaje[]> {
   return msgs.reverse();
 }
 
-function esPedido(textoCliente: string, respuestaAI: string): boolean {
-  const combinado = `${textoCliente} ${respuestaAI}`.toLowerCase();
-  return PALABRAS_PEDIDO.some((p) => combinado.includes(p));
-}
-
 export async function handleIncomingMessage(
   farmacia: Farmacia,
   telefono: string,
@@ -90,7 +78,7 @@ export async function handleIncomingMessage(
     });
     return {
       respuesta: null,
-      pedidoDetectado: false,
+      pedidoConfirmado: undefined,
       esClienteNuevo: false,
       conversacionId: conversacion.id,
       clienteTelefono: telefono,
@@ -102,7 +90,7 @@ export async function handleIncomingMessage(
   });
 
   const historial = await obtenerHistorial(conversacion.id);
-  const respuesta = await generarRespuesta(farmacia, historial, texto, esNuevo);
+  const { texto: respuesta, pedido } = await generarRespuesta(farmacia, historial, texto, esNuevo);
 
   await prisma.mensaje.create({
     data: { conversacionId: conversacion.id, role: 'assistant', contenido: respuesta },
@@ -114,7 +102,7 @@ export async function handleIncomingMessage(
 
   return {
     respuesta,
-    pedidoDetectado: esPedido(texto, respuesta),
+    pedidoConfirmado: pedido,
     esClienteNuevo: esNuevo,
     conversacionId: conversacion.id,
     clienteTelefono: telefono,

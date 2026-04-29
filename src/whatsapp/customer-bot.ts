@@ -47,8 +47,10 @@ async function handlePharmacyMessage(sessionId: string, msg: IncomingMessage) {
     }
   }
 
-  if (result.pedidoDetectado) {
-    await notificarPedido(farmacia, msg.phoneNumber, msg.text).catch((err) =>
+  if (result.pedidoConfirmado) {
+    const { productos, modalidad, direccion } = result.pedidoConfirmado;
+    const resumen = `${productos}\nEntrega: ${modalidad === 'delivery' ? `Delivery a ${direccion ?? '—'}` : 'Retiro en local'}`;
+    await notificarPedido(farmacia, msg.phoneNumber, resumen).catch((err) =>
       logger.error({ err }, 'Error notificando pedido al farmacéutico'),
     );
   }

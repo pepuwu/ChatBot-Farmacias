@@ -89,9 +89,9 @@ export async function notificarPedido(farmacia: Farmacia, telefonoCliente: strin
   }
 
   const msg =
-    `⚠️ Pedido nuevo - ${farmacia.nombre}\n\n` +
-    `👤 Cliente: ${telefonoCliente}\n` +
-    `🛒 Productos: ${textoPedido}\n\n` +
+    `🛒 *Pedido nuevo* — ${farmacia.nombre}\n\n` +
+    `👤 Cliente: ${telefonoCliente}\n\n` +
+    `${textoPedido}\n\n` +
     `Respondé "tomar ${telefonoCliente}" para atenderlo`;
 
   for (const a of admins) {

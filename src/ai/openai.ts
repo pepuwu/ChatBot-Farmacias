@@ -3,6 +3,17 @@ import type { Farmacia, Mensaje } from '@prisma/client';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
+export interface PedidoConfirmado {
+  productos: string;
+  modalidad: 'delivery' | 'retiro';
+  direccion?: string;
+}
+
+export interface RespuestaIA {
+  texto: string;
+  pedido?: PedidoConfirmado;
+}
+
 const client = new OpenAI({ apiKey: config.OPENAI_API_KEY });
 
 type Horarios = { semana?: string; sabado?: string; domingo?: string };
@@ -30,19 +41,65 @@ function consumeRateLimit(farmaciaId: string): boolean {
   return true;
 }
 
+// ─── Tool: confirmar pedido ───────────────────────────────────────────────────
+
+const CONFIRMAR_PEDIDO_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'confirmar_pedido',
+    description:
+      'Llamar ÚNICAMENTE cuando el cliente confirmó todos los productos Y la modalidad (delivery o retiro) Y la dirección si eligió delivery. No llamar si falta cualquiera de esos datos.',
+    parameters: {
+      type: 'object',
+      properties: {
+        productos: {
+          type: 'string',
+          description: 'Lista de productos pedidos, ej: "Ibuprofeno 400mg Actrón x1, Preservativos texturados x1"',
+        },
+        modalidad: { type: 'string', enum: ['delivery', 'retiro'] },
+        direccion: {
+          type: 'string',
+          description: 'Dirección de entrega. Solo incluir si modalidad es delivery.',
+        },
+        mensaje_confirmacion: {
+          type: 'string',
+          description: 'Mensaje para el cliente confirmando el pedido. Avisarle que el farmacéutico lo contacta en breve.',
+        },
+      },
+      required: ['productos', 'modalidad', 'mensaje_confirmacion'],
+    },
+  },
+};
+
 // ─── Llamada con retry en 429 ─────────────────────────────────────────────────
 
 async function callWithRetry(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-): Promise<string> {
+  tools?: OpenAI.Chat.Completions.ChatCompletionTool[],
+): Promise<RespuestaIA> {
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const response = await client.chat.completions.create(
-        { model: config.OPENAI_MODEL, messages },
+        { model: config.OPENAI_MODEL, messages, ...(tools ? { tools, tool_choice: 'auto' } : {}) },
         { timeout: 15_000 },
       );
-      return response.choices[0]?.message?.content?.trim() ?? '';
+      const choice = response.choices[0];
+
+      if (choice?.finish_reason === 'tool_calls') {
+        const toolCall = choice.message.tool_calls?.[0];
+        if (toolCall?.function.name === 'confirmar_pedido') {
+          const args = JSON.parse(toolCall.function.arguments) as {
+            productos: string; modalidad: 'delivery' | 'retiro'; direccion?: string; mensaje_confirmacion: string;
+          };
+          return {
+            texto: args.mensaje_confirmacion,
+            pedido: { productos: args.productos, modalidad: args.modalidad, direccion: args.direccion },
+          };
+        }
+      }
+
+      return { texto: choice?.message?.content?.trim() ?? '' };
     } catch (err: unknown) {
       const status = (err as { status?: number })?.status;
       if (status === 429 && attempt < MAX_RETRIES - 1) {
@@ -54,7 +111,7 @@ async function callWithRetry(
       throw err;
     }
   }
-  return '';
+  return { texto: '' };
 }
 
 // ─── Prompt del sistema ───────────────────────────────────────────────────────
@@ -107,7 +164,13 @@ REGLAS CRÍTICAS:
 4. STOCK Y LISTA DE ESPERA: Si ya confirmaste que un producto está en stock, NUNCA ofrezcas lista de espera. La lista de espera solo se menciona si el producto explícitamente no está disponible.
 5. No hagas listas largas — respondé lo que el cliente necesita.
 6. OBRAS SOCIALES: Usá exclusivamente la información cargada arriba. Nunca improvises ni inventes coberturas. Si no hay info cargada, decíselo al cliente directamente.
-${telefono ? `7. TELÉFONO: Si el cliente pide el número de contacto, usá siempre exactamente: ${telefono}. Nunca uses placeholders como "[inserta número]".\n` : '7. TELÉFONO: No hay número de contacto cargado. No menciones teléfono ni uses placeholders.\n'}8. CIERRE EN VENTA: Cuando el cliente mostró intención de compra, cerrá siempre con una opción concreta: "¿Lo separamos para que pases a buscarlo?"${farmacia.delivery ? ' o "¿Te lo enviamos por delivery?"' : ''}. Usá "¿necesitás algo más?" solo cuando el cliente claramente no tiene intención de compra en esa consulta.
+${telefono ? `7. TELÉFONO: Si el cliente pide el número de contacto, usá siempre exactamente: ${telefono}. Nunca uses placeholders como "[inserta número]".\n` : '7. TELÉFONO: No hay número de contacto cargado. No menciones teléfono ni uses placeholders.\n'}
+FLUJO DE PEDIDO — seguí este orden exacto, sin repetir preguntas ya respondidas:
+Paso 1: El cliente menciona productos → confirmá que los tenés en stock.
+Paso 2: Si aún no preguntaste: "¿Lo buscás vos o te lo enviamos por delivery?" (preguntalo UNA sola vez).
+Paso 3: Si eligió delivery y no tenés la dirección todavía: pedí la dirección.
+Paso 4: Cuando tenés productos + modalidad + dirección (si delivery) → llamá a confirmar_pedido. NO hagas más preguntas.
+IMPORTANTE: Si el cliente ya respondió la modalidad, NO la vuelvas a preguntar. Si dijo "delivery", pedí la dirección directamente.
 ${bloqueMenu}`;
 }
 
@@ -133,10 +196,10 @@ export async function generarRespuesta(
   historial: Mensaje[],
   mensajeActual: string,
   esPrimerMensaje = false,
-): Promise<string> {
+): Promise<RespuestaIA> {
   if (!consumeRateLimit(farmacia.id)) {
     logger.warn({ farmaciaId: farmacia.id }, 'OpenAI: rate limit alcanzado');
-    return 'Estamos recibiendo muchas consultas en este momento. Por favor intentá de nuevo en unos segundos 🙏';
+    return { texto: 'Estamos recibiendo muchas consultas en este momento. Por favor intentá de nuevo en unos segundos 🙏' };
   }
 
   const systemPrompt = buildSystemPrompt(farmacia, esPrimerMensaje);
@@ -155,12 +218,12 @@ export async function generarRespuesta(
   logger.info({ farmacia: farmacia.nombre, msgs: messages.length, primerMensaje: esPrimerMensaje }, 'OpenAI: enviando');
 
   try {
-    const texto = await callWithRetry(messages);
-    logger.info({ chars: texto.length }, 'OpenAI: respuesta recibida');
-    return texto || 'Lo siento, no pude generar una respuesta. Probá de nuevo.';
+    const result = await callWithRetry(messages, [CONFIRMAR_PEDIDO_TOOL]);
+    logger.info({ chars: result.texto.length, pedido: !!result.pedido }, 'OpenAI: respuesta recibida');
+    return result.texto ? result : { ...result, texto: 'Lo siento, no pude generar una respuesta. Probá de nuevo.' };
   } catch (err) {
     logger.error({ err }, 'OpenAI: error');
-    return 'Lo siento, tuve un problema al procesar tu mensaje. Por favor intentá de nuevo.';
+    return { texto: 'Lo siento, tuve un problema al procesar tu mensaje. Por favor intentá de nuevo.' };
   }
 }
 
