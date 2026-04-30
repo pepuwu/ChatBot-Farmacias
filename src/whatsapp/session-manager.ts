@@ -41,19 +41,44 @@ class SessionManager {
   private qrListeners = new Set<(sessionId: string, qr: string) => void>();
   // Single-flight: evita lookups duplicados para el mismo número en vuelo
   private jidLookups = new Map<string, Promise<string>>();
-  // Cola por conversación: serializa mensajes del mismo cliente para evitar
-  // respuestas fuera de orden cuando OpenAI tarda más que el intervalo entre mensajes
-  private processingQueues = new Map<string, Promise<void>>();
+  // Debounce por conversación: acumula mensajes rápidos y los procesa como uno solo
+  private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private debounceBuffers = new Map<string, { msgs: IncomingMessage[]; base: IncomingMessage }>();
+  private static readonly DEBOUNCE_MS = 1500;
 
-  private enqueue(key: string, task: () => Promise<void>): void {
-    const prev = this.processingQueues.get(key) ?? Promise.resolve();
-    const next = prev.then(task).catch((err) => {
-      logger.error({ err, key }, 'Error en cola de mensajes');
-    });
-    this.processingQueues.set(key, next);
-    next.finally(() => {
-      if (this.processingQueues.get(key) === next) this.processingQueues.delete(key);
-    });
+  private debounce(key: string, msg: IncomingMessage, sessionId: string): void {
+    const existing = this.debounceBuffers.get(key);
+    if (existing) {
+      existing.msgs.push(msg);
+    } else {
+      this.debounceBuffers.set(key, { msgs: [msg], base: msg });
+    }
+
+    const prev = this.debounceTimers.get(key);
+    if (prev) clearTimeout(prev);
+
+    const timer = setTimeout(() => {
+      this.debounceTimers.delete(key);
+      const buf = this.debounceBuffers.get(key);
+      this.debounceBuffers.delete(key);
+      if (!buf) return;
+
+      const combined: IncomingMessage = buf.msgs.length === 1
+        ? buf.base
+        : { ...buf.base, text: buf.msgs.map((m) => m.text).join('\n') };
+
+      if (buf.msgs.length > 1) {
+        logger.info({ key, count: buf.msgs.length, text: combined.text.slice(0, 120) }, '📦 Mensajes concatenados');
+      }
+
+      for (const handler of this.handlers) {
+        Promise.resolve(handler(sessionId, combined)).catch((err: unknown) =>
+          logger.error({ err, sessionId }, 'Handler de mensaje falló'),
+        );
+      }
+    }, SessionManager.DEBOUNCE_MS);
+
+    this.debounceTimers.set(key, timer);
   }
 
   onMessage(handler: MessageHandler) {
@@ -240,15 +265,7 @@ class SessionManager {
           '📩 Mensaje recibido',
         );
         const queueKey = `${sessionId}:${normalized.phoneNumber}`;
-        this.enqueue(queueKey, async () => {
-          for (const handler of this.handlers) {
-            try {
-              await handler(sessionId, normalized);
-            } catch (err) {
-              logger.error({ err, sessionId }, 'Handler de mensaje falló');
-            }
-          }
-        });
+        this.debounce(queueKey, normalized, sessionId);
       }
     });
 
