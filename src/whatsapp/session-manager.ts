@@ -41,6 +41,20 @@ class SessionManager {
   private qrListeners = new Set<(sessionId: string, qr: string) => void>();
   // Single-flight: evita lookups duplicados para el mismo número en vuelo
   private jidLookups = new Map<string, Promise<string>>();
+  // Cola por conversación: serializa mensajes del mismo cliente para evitar
+  // respuestas fuera de orden cuando OpenAI tarda más que el intervalo entre mensajes
+  private processingQueues = new Map<string, Promise<void>>();
+
+  private enqueue(key: string, task: () => Promise<void>): void {
+    const prev = this.processingQueues.get(key) ?? Promise.resolve();
+    const next = prev.then(task).catch((err) => {
+      logger.error({ err, key }, 'Error en cola de mensajes');
+    });
+    this.processingQueues.set(key, next);
+    next.finally(() => {
+      if (this.processingQueues.get(key) === next) this.processingQueues.delete(key);
+    });
+  }
 
   onMessage(handler: MessageHandler) {
     this.handlers.add(handler);
@@ -225,13 +239,16 @@ class SessionManager {
           { sessionId, from: normalized.from, isFromMe: normalized.isFromMe, text: normalized.text.slice(0, 80) },
           '📩 Mensaje recibido',
         );
-        for (const handler of this.handlers) {
-          try {
-            await handler(sessionId, normalized);
-          } catch (err) {
-            logger.error({ err, sessionId }, 'Handler de mensaje falló');
+        const queueKey = `${sessionId}:${normalized.phoneNumber}`;
+        this.enqueue(queueKey, async () => {
+          for (const handler of this.handlers) {
+            try {
+              await handler(sessionId, normalized);
+            } catch (err) {
+              logger.error({ err, sessionId }, 'Handler de mensaje falló');
+            }
           }
-        }
+        });
       }
     });
 
